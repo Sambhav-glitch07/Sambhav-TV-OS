@@ -125,7 +125,13 @@ class MainActivity : Activity() {
             orientation = LinearLayout.HORIZONTAL
             gravity = Gravity.CENTER_VERTICAL
         }
-        scroller.addView(appsRow, ScrollView.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(112)))
+        scroller.addView(
+    appsRow,
+    ViewGroup.LayoutParams(
+        ViewGroup.LayoutParams.MATCH_PARENT,
+        dp(112)
+    )
+)
         root.addView(scroller, LinearLayout.LayoutParams(ViewGroup.LayoutParams.MATCH_PARENT, dp(122)))
 
         val footer = LinearLayout(this).apply {
