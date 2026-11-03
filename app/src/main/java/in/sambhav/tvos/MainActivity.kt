@@ -1,4 +1,3 @@
-
 package `in`.sambhav.tvos
 
 import android.app.Activity
