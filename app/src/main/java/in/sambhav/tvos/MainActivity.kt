@@ -1,4 +1,4 @@
-package in.sambhav.tvos
+package `in`.sambhav.tvos
 
 import android.app.Activity
 import android.app.AlertDialog
