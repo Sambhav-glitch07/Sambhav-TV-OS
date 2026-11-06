@@ -16,6 +16,8 @@ import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
+import android.graphics.ColorMatrix
+import android.graphics.ColorMatrixColorFilter
 import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
@@ -28,6 +30,7 @@ import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
 import android.media.MediaMetadata
+import android.net.Uri
 import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
@@ -51,6 +54,8 @@ import android.view.animation.DecelerateInterpolator
 import android.widget.FrameLayout
 import android.widget.LinearLayout
 import android.widget.TextView
+import java.io.File
+import java.io.FileOutputStream
 import java.text.SimpleDateFormat
 import java.util.Date
 import java.util.Locale
@@ -70,8 +75,7 @@ import kotlin.math.sin
 //  Native Views only. Every surface is drawn with Canvas. No WebView, Compose or
 //  third party libraries.
 //
-//  Optional: drop your own picture at app/src/main/res/drawable-nodpi/wallpaper.jpg
-//  and it is used automatically instead of the built in sky scene.
+//  Backgrounds: choose a preset or your own image from the palette button (or the Menu key).
 // =====================================================================================
 
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
@@ -269,16 +273,21 @@ class GlassSurface(private val tone: Tone) {
 
     val rect = RectF()
     var shadowEnabled = true
+    private var host: View? = null
     private var radius = 0f
     private var accent = 0
     private val tmp = RectF()
     private val clipPath = Path()
     private val sheenPath = Path()
     private val underPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val plainPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tintPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val backdropPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val grainPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val sheenPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val topGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val bottomGlowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val edgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val innerPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val ringPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -290,11 +299,17 @@ class GlassSurface(private val tone: Tone) {
         grainPaint.shader = GrainTexture.shader()
         edgePaint.style = Paint.Style.STROKE
         innerPaint.style = Paint.Style.STROKE
-        innerPaint.color = Color.argb(26, 255, 255, 255)
+        innerPaint.color = Color.argb(30, 255, 255, 255)
         ringPaint.style = Paint.Style.STROKE
         ringPaint.color = Color.WHITE
         liftPaint.color = Color.WHITE
         shadowPaint.color = Color.BLACK
+    }
+
+    /** Lets the surface sample the blurred wallpaper that sits behind its owner view. */
+    fun attach(view: View): GlassSurface {
+        host = view
+        return this
     }
 
     fun layout(l: Float, t: Float, r: Float, b: Float, cornerRadius: Float, accentColor: Int = 0) {
@@ -307,20 +322,19 @@ class GlassSurface(private val tone: Tone) {
         clipPath.reset()
         clipPath.addRoundRect(rect, radius, radius, Path.Direction.CW)
 
-        edgePaint.strokeWidth = max(1.2f, Ui.s(1.6f))
+        edgePaint.strokeWidth = max(1.3f, Ui.s(1.8f))
         innerPaint.strokeWidth = max(1f, Ui.s(1f))
         ringPaint.strokeWidth = max(2f, Ui.s(2.5f))
 
-        fillPaint.shader = when (tone) {
-            Tone.SMOKED -> LinearGradient(
-                0f, t, 0f, b, Color.argb(206, 36, 39, 47), Color.argb(228, 14, 15, 19), Shader.TileMode.CLAMP
-            )
-            Tone.FROST -> LinearGradient(
-                0f, t, 0f, b, Color.argb(98, 255, 255, 255), Color.argb(46, 222, 230, 245), Shader.TileMode.CLAMP
-            )
-            Tone.BRIGHT -> LinearGradient(
-                0f, t, 0f, b, Color.argb(244, 252, 252, 254), Color.argb(226, 212, 218, 229), Shader.TileMode.CLAMP
-            )
+        plainPaint.shader = when (tone) {
+            Tone.SMOKED -> LinearGradient(0f, t, 0f, b, Color.argb(206, 36, 39, 47), Color.argb(228, 14, 15, 19), Shader.TileMode.CLAMP)
+            Tone.FROST -> LinearGradient(0f, t, 0f, b, Color.argb(98, 255, 255, 255), Color.argb(46, 222, 230, 245), Shader.TileMode.CLAMP)
+            Tone.BRIGHT -> LinearGradient(0f, t, 0f, b, Color.argb(244, 252, 252, 254), Color.argb(226, 212, 218, 229), Shader.TileMode.CLAMP)
+        }
+        tintPaint.shader = when (tone) {
+            Tone.SMOKED -> LinearGradient(0f, t, 0f, b, Color.argb(138, 20, 22, 30), Color.argb(190, 6, 7, 11), Shader.TileMode.CLAMP)
+            Tone.FROST -> LinearGradient(0f, t, 0f, b, Color.argb(74, 255, 255, 255), Color.argb(30, 235, 242, 255), Shader.TileMode.CLAMP)
+            Tone.BRIGHT -> LinearGradient(0f, t, 0f, b, Color.argb(216, 250, 251, 254), Color.argb(196, 214, 220, 232), Shader.TileMode.CLAMP)
         }
 
         sheenPath.reset()
@@ -329,18 +343,27 @@ class GlassSurface(private val tone: Tone) {
         sheenPath.lineTo(l + w * 0.26f, b)
         sheenPath.lineTo(l, b)
         sheenPath.close()
-        val sheenAlpha = if (tone == Tone.BRIGHT) 40 else 46
+        val sheenAlpha = if (tone == Tone.BRIGHT) 38 else 52
         sheenPaint.shader = LinearGradient(
             l, t, l + w * 0.55f, t + h * 0.75f,
             Color.argb(sheenAlpha, 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP
         )
-
+        val topAlpha = when (tone) {
+            Tone.FROST -> 58
+            Tone.SMOKED -> 34
+            Tone.BRIGHT -> 46
+        }
+        topGlowPaint.shader = LinearGradient(
+            0f, t, 0f, t + h * 0.5f, Color.argb(topAlpha, 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP
+        )
+        bottomGlowPaint.shader = LinearGradient(
+            0f, b - h * 0.3f, 0f, b, Color.argb(0, 255, 255, 255), Color.argb(40, 255, 255, 255), Shader.TileMode.CLAMP
+        )
         edgePaint.shader = LinearGradient(
             0f, t, 0f, b,
-            intArrayOf(Color.argb(176, 255, 255, 255), Color.argb(34, 255, 255, 255), Color.argb(92, 255, 255, 255)),
+            intArrayOf(Color.argb(205, 255, 255, 255), Color.argb(40, 255, 255, 255), Color.argb(110, 255, 255, 255)),
             floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
         )
-
         if (accent != 0) {
             glowPaint.shader = RadialGradient(
                 l + w * 0.30f, t + h * 0.18f, max(w, h) * 0.95f,
@@ -353,9 +376,20 @@ class GlassSurface(private val tone: Tone) {
     fun drawBase(c: Canvas, focus: Float, fillAlpha: Int = 255) {
         if (rect.width() <= 0f) return
         if (shadowEnabled) drawShadow(c, focus)
-        if (tone == Tone.FROST) c.drawRoundRect(rect, radius, radius, underPaint)
-        fillPaint.alpha = fillAlpha
-        c.drawRoundRect(rect, radius, radius, fillPaint)
+        val owner = host
+        if (owner != null && Backdrop.isReady()) {
+            c.save()
+            c.clipPath(clipPath)
+            backdropPaint.alpha = fillAlpha
+            Backdrop.draw(c, owner, backdropPaint)
+            c.restore()
+            tintPaint.alpha = fillAlpha
+            c.drawRoundRect(rect, radius, radius, tintPaint)
+        } else {
+            if (tone == Tone.FROST) c.drawRoundRect(rect, radius, radius, underPaint)
+            plainPaint.alpha = fillAlpha
+            c.drawRoundRect(rect, radius, radius, plainPaint)
+        }
         if (accent != 0) {
             c.save()
             c.clipPath(clipPath)
@@ -370,6 +404,8 @@ class GlassSurface(private val tone: Tone) {
         c.clipPath(clipPath)
         c.drawRect(rect, grainPaint)
         c.drawPath(sheenPath, sheenPaint)
+        c.drawRect(rect, topGlowPaint)
+        c.drawRect(rect, bottomGlowPaint)
         if (focus > 0f && tone != Tone.BRIGHT) {
             liftPaint.alpha = (focus * 34f).toInt()
             c.drawRect(rect, liftPaint)
@@ -407,7 +443,7 @@ class GlassSurface(private val tone: Tone) {
 //  SECTION 3 - Vector glyphs, brand mark and icon plates
 // =====================================================================================
 
-enum class Glyph { PLAY, GRID, INFO, WIFI, DISPLAY, SOUND, BLUETOOTH, CLOCK, SLIDERS, REFRESH, CLEAR, GEAR, INPUT, PREV, NEXT, PAUSE }
+enum class Glyph { PLAY, GRID, INFO, WIFI, DISPLAY, SOUND, BLUETOOTH, CLOCK, SLIDERS, REFRESH, CLEAR, GEAR, INPUT, PREV, NEXT, PAUSE, PALETTE }
 
 object GlyphPainter {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -581,6 +617,15 @@ object GlyphPainter {
                 path.lineTo(cx + h * 0.34f, cy)
                 path.close()
                 c.drawPath(path, paint)
+            }
+            Glyph.PALETTE -> {
+                c.drawCircle(cx, cy, h * 0.95f, paint)
+                paint.style = Paint.Style.FILL
+                val dot = size * 0.07f
+                c.drawCircle(cx - h * 0.38f, cy - h * 0.18f, dot, paint)
+                c.drawCircle(cx + h * 0.1f, cy - h * 0.46f, dot, paint)
+                c.drawCircle(cx + h * 0.5f, cy - h * 0.1f, dot, paint)
+                c.drawCircle(cx - h * 0.12f, cy + h * 0.38f, dot, paint)
             }
             Glyph.PAUSE -> {
                 paint.style = Paint.Style.FILL
@@ -1029,7 +1074,7 @@ class GlassPanelLayout(
     tone: GlassSurface.Tone,
     private val cornerRadius: Float
 ) : LinearLayout(context) {
-    private val surface = GlassSurface(tone)
+    private val surface = GlassSurface(tone).attach(this)
 
     init {
         setWillNotDraw(false)
@@ -1068,7 +1113,7 @@ class AppTile(
     private val labelH = Ui.s(tileStyle.labelH)
     val tileWidth: Int = (cardW + bleed * 2).roundToInt()
     val tileHeight: Int = heightFor(tileStyle)
-    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val surface = GlassSurface(GlassSurface.Tone.SMOKED).attach(this)
     private val cardRect = RectF()
     private val labelPaint = Ui.textPaint(Ui.s(23f), Color.WHITE, Fonts.medium, 0.005f)
     private val eyebrowPaint = Ui.textPaint(Ui.s(15f), Ui.alpha(Color.WHITE, 0.7f), Fonts.medium, 0.16f)
@@ -1177,7 +1222,7 @@ class AppTile(
 
 
 class NoticeView(context: Context) : View(context) {
-    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val surface = GlassSurface(GlassSurface.Tone.SMOKED).attach(this)
     private val paint = Ui.textPaint(Ui.s(26f), Color.WHITE, Fonts.medium)
     private val bleed = Ui.s(30f)
     private val padX = Ui.s(40f)
@@ -1325,7 +1370,8 @@ object WallpaperArt {
 
 class WallpaperView(context: Context) : View(context) {
     private var bitmap: Bitmap? = null
-    private var reveal = 0f
+    private var previous: Bitmap? = null
+    private var reveal = 1f
     private var pan = 0f
     private var panAnimator: ValueAnimator? = null
     private var revealAnimator: ValueAnimator? = null
@@ -1335,12 +1381,15 @@ class WallpaperView(context: Context) : View(context) {
     private val dst = RectF()
 
     fun setBitmap(b: Bitmap) {
+        previous = bitmap
         bitmap = b
         revealAnimator?.cancel()
+        reveal = 0f
         val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = 800L
+        a.duration = 900L
         a.addUpdateListener {
             reveal = it.animatedValue as Float
+            if (reveal >= 1f) previous = null
             invalidate()
         }
         revealAnimator = a
@@ -1371,12 +1420,17 @@ class WallpaperView(context: Context) : View(context) {
     override fun onDraw(canvas: Canvas) {
         val w = width.toFloat()
         val h = height.toFloat()
-        canvas.drawColor(0xFF2A74AC.toInt())
+        canvas.drawColor(0xFF0A0B0F.toInt())
+        val extra = w * 0.03f
+        val shift = pan * extra
+        dst.set(-extra - shift, -extra * 0.5f, w + extra - shift, h + extra * 0.5f)
+        val old = previous
+        if (old != null) {
+            paint.alpha = 255
+            BitmapUtil.drawCropped(canvas, old, dst, paint)
+        }
         val bmp = bitmap
         if (bmp != null) {
-            val extra = w * 0.03f
-            val shift = pan * extra
-            dst.set(-extra - shift, -extra * 0.5f, w + extra - shift, h + extra * 0.5f)
             paint.alpha = (reveal * 255f).toInt()
             BitmapUtil.drawCropped(canvas, bmp, dst, paint)
         }
@@ -1596,7 +1650,7 @@ class RoundButton(
     private val glyphColor: Int
 ) : FocusGlassView(context, 1.16f, 0f) {
     private val bleed = Ui.s(12f)
-    private val surface = GlassSurface(tone)
+    private val surface = GlassSurface(tone).attach(this)
 
     fun setGlyph(g: Glyph) {
         glyph = g
@@ -1631,7 +1685,7 @@ class NowPlayingPill(context: Context) : FrameLayout(context) {
     private val pillH = Ui.s(160f)
     val viewWidth: Int = (pillW + bleed * 2).roundToInt()
     val viewHeight: Int = (pillH + bleed * 2).roundToInt()
-    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val surface = GlassSurface(GlassSurface.Tone.SMOKED).attach(this)
     private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
     private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
     private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -1659,7 +1713,7 @@ class NowPlayingPill(context: Context) : FrameLayout(context) {
         setWillNotDraw(false)
         clipChildren = false
         clipToPadding = false
-        fillPaint.color = Color.argb(214, 3, 3, 5)
+        fillPaint.color = Color.argb(120, 3, 3, 6)
         trackPaint.color = Color.argb(60, 255, 255, 255)
         progressPaint.color = SPOTIFY_GREEN
         artPlaceholder.color = Color.rgb(40, 44, 52)
@@ -1872,8 +1926,8 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
     val tileWidth: Int = (cardW + bleed * 2).roundToInt()
     val tileHeight: Int = (cardH + roomY * 2).roundToInt()
     val packageName: String? get() = entry?.packageName
-    private val frost = GlassSurface(GlassSurface.Tone.FROST)
-    private val dark = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val frost = GlassSurface(GlassSurface.Tone.FROST).attach(this)
+    private val dark = GlassSurface(GlassSurface.Tone.SMOKED).attach(this)
     private val cardRect = RectF()
     private val tipRect = RectF()
     private val mediaPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
@@ -2004,7 +2058,9 @@ class AllAppsOverlay(
     context: Context,
     private val onLaunch: (AppEntry) -> Unit,
     private val onPinToggle: (AppEntry) -> Unit
-) : FrameLayout(context) {
+) : SheetLayout(context, { w, h ->
+    RectF(Ui.s(40f), Ui.s(36f), w - Ui.s(40f), h + Ui.s(240f))
+}) {
     private val stage = VerticalStage(context)
     private var firstTile: View? = null
     var isOpen = false
@@ -2012,7 +2068,6 @@ class AllAppsOverlay(
 
     init {
         visibility = View.GONE
-        setBackgroundColor(Ui.alpha(Color.BLACK, 0.80f))
         stage.anchorTop = Ui.s(200f)
         stage.column.setPadding(0, 0, 0, Ui.px(120))
         addView(stage, FrameLayout.LayoutParams(MATCH, MATCH))
@@ -2078,16 +2133,20 @@ class MainActivity : Activity() {
     private lateinit var pill: NowPlayingPill
     private lateinit var dock: GlassPanelLayout
     private lateinit var overlay: AllAppsOverlay
+    private lateinit var bgMenu: BackgroundMenu
     private lateinit var notice: NoticeView
     private lateinit var repository: AppRepository
     private lateinit var recents: RecentsStore
     private lateinit var dockStore: DockStore
+    private lateinit var store: WallpaperStore
     private lateinit var tracker: NowPlayingTracker
     private val dockTiles = ArrayList<DockTile>()
+    private val thumbCache = HashMap<String, Bitmap>()
     private var apps: List<AppEntry> = emptyList()
     private var nowPlaying: NowPlaying? = null
     private var lastDockKey: String? = null
     private var loadToken = 0
+    private var wallToken = 0
     private var receiversRegistered = false
     private val handler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -2104,10 +2163,11 @@ class MainActivity : Activity() {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Ui.init(this)
-        window.setBackgroundDrawable(ColorDrawable(0xFF2A74AC.toInt()))
+        window.setBackgroundDrawable(ColorDrawable(0xFF0A0B0F.toInt()))
         repository = AppRepository(applicationContext)
         recents = RecentsStore(applicationContext)
         dockStore = DockStore(applicationContext)
+        store = WallpaperStore(applicationContext)
         tracker = NowPlayingTracker(this, handler, { onNowPlaying(it) }, { onMediaAccessDenied() })
         lastDockKey = savedInstanceState?.getString(STATE_FOCUS)
         buildShell()
@@ -2163,6 +2223,7 @@ class MainActivity : Activity() {
         super.onNewIntent(intent)
         if (intent != null && intent.hasCategory(Intent.CATEGORY_HOME)) {
             if (overlay.isOpen) closeAllApps(false)
+            if (bgMenu.isOpen) closeBackgrounds(false)
             lastDockKey = null
             focusDock(null)
         }
@@ -2172,7 +2233,7 @@ class MainActivity : Activity() {
 
     private fun buildShell() {
         root = FrameLayout(this)
-        root.setBackgroundColor(0xFF2A74AC.toInt())
+        root.setBackgroundColor(0xFF0A0B0F.toInt())
         root.clipChildren = false
 
         wallpaper = WallpaperView(this)
@@ -2202,12 +2263,15 @@ class MainActivity : Activity() {
         buttons.clipChildren = false
         buttons.clipToPadding = false
         val diameter = Ui.s(69f)
+        val background = RoundButton(this, Glyph.PALETTE, diameter, GlassSurface.Tone.FROST, Color.WHITE)
         val inputs = RoundButton(this, Glyph.INPUT, diameter, GlassSurface.Tone.FROST, Color.WHITE)
         val network = RoundButton(this, Glyph.WIFI, diameter, GlassSurface.Tone.FROST, Color.WHITE)
         val gear = RoundButton(this, Glyph.GEAR, diameter, GlassSurface.Tone.FROST, Color.WHITE)
+        background.focusKey = "top:background"
         inputs.focusKey = "top:inputs"
         network.focusKey = "top:network"
         gear.focusKey = "top:settings"
+        background.setOnClickListener { openBackgrounds() }
         inputs.setOnClickListener {
             openSystem(
                 listOf("android.media.tv.action.SETUP_INPUTS", "android.settings.INPUT_METHOD_SETTINGS"),
@@ -2220,7 +2284,7 @@ class MainActivity : Activity() {
         gear.setOnClickListener {
             openSystem(listOf(Settings.ACTION_SETTINGS), "Settings are unavailable on this device")
         }
-        for (b in listOf(inputs, network, gear)) {
+        for (b in listOf(background, inputs, network, gear)) {
             val lp = LinearLayout.LayoutParams(WRAP, WRAP)
             lp.leftMargin = -Ui.px(4)
             lp.rightMargin = -Ui.px(4)
@@ -2232,7 +2296,7 @@ class MainActivity : Activity() {
         buttonParams.rightMargin = Ui.px(81) - Ui.px(12)
         content.addView(buttons, buttonParams)
 
-        dock = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(46f))
+        dock = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(50f))
         dock.orientation = LinearLayout.HORIZONTAL
         dock.gravity = Gravity.CENTER
         val dockParams = FrameLayout.LayoutParams(Ui.px(1757), Ui.px(124))
@@ -2243,6 +2307,9 @@ class MainActivity : Activity() {
         overlay = AllAppsOverlay(this, { launchFromOverlay(it) }, { togglePin(it) })
         root.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
 
+        bgMenu = BackgroundMenu(this, { applyBackground(it) }, { pickImage() }, { deleteBackground(it) })
+        root.addView(bgMenu, FrameLayout.LayoutParams(MATCH, MATCH))
+
         notice = NoticeView(this)
         val noticeParams = FrameLayout.LayoutParams(WRAP, WRAP)
         noticeParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
@@ -2250,30 +2317,131 @@ class MainActivity : Activity() {
         root.addView(notice, noticeParams)
     }
 
+    // ---- wallpaper -------------------------------------------------------------------
+
     private fun loadWallpaper() {
+        val token = ++wallToken
         val metrics = resources.displayMetrics
+        val id = store.currentId()
         val w = min(metrics.widthPixels, 1600)
         val h = min(metrics.heightPixels, 900)
+        val reqW = min(metrics.widthPixels, 1920)
         executor.execute {
             val bmp: Bitmap = try {
-                val id = resources.getIdentifier("wallpaper", "drawable", packageName)
-                if (id != 0) decodeSampled(id, metrics.widthPixels, metrics.heightPixels) else WallpaperArt.render(w, h)
+                store.render(id, w, h, reqW)
             } catch (t: Throwable) {
-                WallpaperArt.render(w, h)
+                PresetArt.render("sky", w, h)
             }
-            handler.post { if (!isDestroyed) wallpaper.setBitmap(bmp) }
+            val blur: Bitmap? = try {
+                BoxBlur.blurred(bmp, 160, 3, 3)
+            } catch (t: Throwable) {
+                null
+            }
+            handler.post {
+                if (token == wallToken && !isDestroyed) {
+                    Backdrop.set(blur, metrics.widthPixels, metrics.heightPixels)
+                    wallpaper.setBitmap(bmp)
+                    root.invalidateTree()
+                }
+            }
         }
     }
 
-    private fun decodeSampled(resId: Int, reqW: Int, reqH: Int): Bitmap {
-        val bounds = BitmapFactory.Options()
-        bounds.inJustDecodeBounds = true
-        BitmapFactory.decodeResource(resources, resId, bounds)
-        var sample = 1
-        while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
-        val opts = BitmapFactory.Options()
-        opts.inSampleSize = sample
-        return BitmapFactory.decodeResource(resources, resId, opts) ?: throw IllegalStateException("wallpaper decode failed")
+    private fun openBackgrounds() {
+        if (overlay.isOpen || bgMenu.isOpen) return
+        executor.execute {
+            val options = store.options()
+            val thumbs = HashMap<String, Bitmap>()
+            for (opt in options) {
+                val key = opt.id + ":" + (opt.file?.lastModified() ?: 0L)
+                val cached = thumbCache[key]
+                val thumb = cached ?: try {
+                    store.thumbnail(opt)
+                } catch (t: Throwable) {
+                    null
+                }
+                if (thumb != null) {
+                    thumbCache[key] = thumb
+                    thumbs[opt.id] = thumb
+                }
+            }
+            handler.post {
+                if (isDestroyed) return@post
+                bgMenu.populate(options, thumbs, store.currentId(), store.dir.absolutePath)
+                content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+                bgMenu.open()
+                runAfterLayout { bgMenu.preferredFocus()?.requestFocus() }
+            }
+        }
+    }
+
+    private fun closeBackgrounds(restoreFocus: Boolean) {
+        bgMenu.close()
+        content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        if (restoreFocus) runAfterLayout { focusByKey("top:background") }
+    }
+
+    private fun applyBackground(option: BgOption) {
+        store.setCurrent(option.id)
+        closeBackgrounds(true)
+        loadWallpaper()
+        notice.show("Background set to " + option.name)
+    }
+
+    private fun deleteBackground(option: BgOption) {
+        if (store.delete(option)) {
+            if (store.currentId() == option.id) {
+                store.setCurrent("sky")
+                loadWallpaper()
+            }
+            notice.show("Removed " + option.name)
+        }
+        bgMenu.close()
+        content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        handler.postDelayed({ openBackgrounds() }, 320L)
+    }
+
+    private fun pickImage() {
+        val intents = listOf(Intent.ACTION_GET_CONTENT, Intent.ACTION_OPEN_DOCUMENT)
+        for (action in intents) {
+            try {
+                val intent = Intent(action)
+                intent.type = "image/*"
+                intent.addCategory(Intent.CATEGORY_OPENABLE)
+                startActivityForResult(intent, REQ_PICK)
+                return
+            } catch (e: ActivityNotFoundException) {
+                // try the next picker
+            } catch (e: SecurityException) {
+                // try the next picker
+            }
+        }
+        notice.show("No file picker on this TV. Copy images to the folder shown in the menu")
+    }
+
+    override fun onActivityResult(requestCode: Int, resultCode: Int, data: Intent?) {
+        super.onActivityResult(requestCode, resultCode, data)
+        val uri = data?.data
+        if (requestCode != REQ_PICK || resultCode != RESULT_OK || uri == null) return
+        notice.show("Importing image")
+        executor.execute {
+            val option = try {
+                store.import(uri)
+            } catch (t: Throwable) {
+                null
+            }
+            handler.post {
+                if (isDestroyed) return@post
+                if (option != null) {
+                    store.setCurrent(option.id)
+                    closeBackgrounds(true)
+                    loadWallpaper()
+                    notice.show("Background applied")
+                } else {
+                    notice.show("That image could not be used")
+                }
+            }
+        }
     }
 
     // ---- data ------------------------------------------------------------------------
@@ -2290,7 +2458,7 @@ class MainActivity : Activity() {
                 if (token == loadToken && !isDestroyed) {
                     apps = list
                     val key = (currentFocus as? FocusGlassView)?.focusKey ?: lastDockKey
-                    rebuildDock(key, !overlay.isOpen)
+                    rebuildDock(key, !overlay.isOpen && !bgMenu.isOpen)
                 }
             }
         }
@@ -2320,7 +2488,7 @@ class MainActivity : Activity() {
         grid.setOnClickListener { openAllApps() }
         grid.onFocusGained = { onDockFocused("dock:grid", total - 1, total) }
         addDockTile(grid)
-        if (restoreFocus) runAfterLayout { focusDock(focusKey) }
+        if (restoreFocus) runAfterLayout { focusByKey(focusKey) }
     }
 
     private fun addDockTile(tile: DockTile) {
@@ -2331,11 +2499,13 @@ class MainActivity : Activity() {
         dockTiles.add(tile)
     }
 
-    private fun focusDock(key: String?) {
-        val target = (if (key != null) dock.findFocusGlass { it.focusKey == key } else null)
+    private fun focusByKey(key: String?) {
+        val target = (if (key != null) content.findFocusGlass { it.focusKey == key } else null)
             ?: dock.findFocusGlass { true }
         target?.requestFocus()
     }
+
+    private fun focusDock(key: String?) = focusByKey(key)
 
     private fun onDockFocused(key: String, index: Int, total: Int) {
         lastDockKey = key
@@ -2384,6 +2554,7 @@ class MainActivity : Activity() {
     }
 
     private fun openAllApps() {
+        if (bgMenu.isOpen) return
         overlay.populate(apps)
         content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         overlay.open()
@@ -2393,7 +2564,7 @@ class MainActivity : Activity() {
     private fun closeAllApps(restoreFocus: Boolean) {
         overlay.close()
         content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
-        if (restoreFocus) runAfterLayout { focusDock("dock:grid") }
+        if (restoreFocus) runAfterLayout { focusByKey("dock:grid") }
     }
 
     private fun onNowPlaying(np: NowPlaying?) {
@@ -2424,9 +2595,15 @@ class MainActivity : Activity() {
     // ---- keys ------------------------------------------------------------------------
 
     override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_MENU) {
+            if (event == null || event.repeatCount == 0) openBackgrounds()
+            return true
+        }
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (event == null || event.repeatCount == 0) {
-                if (overlay.isOpen) {
+                if (bgMenu.isOpen) {
+                    closeBackgrounds(true)
+                } else if (overlay.isOpen) {
                     closeAllApps(true)
                 } else if (currentFocus !is DockTile) {
                     focusDock(lastDockKey)
@@ -2439,5 +2616,535 @@ class MainActivity : Activity() {
 
     companion object {
         private const val STATE_FOCUS = "state_focus"
+        private const val REQ_PICK = 4107
+    }
+}
+
+
+// =====================================================================================
+//  SECTION 9 - Backdrop blur, preset wallpapers and wallpaper storage
+// =====================================================================================
+
+/** Heavily blurred copy of the wallpaper. Glass surfaces draw it behind themselves for a true frosted look. */
+object Backdrop {
+    private var blurred: Bitmap? = null
+    private val dst = RectF()
+    private val loc = IntArray(2)
+    private val filter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(1.45f) })
+
+    fun isReady(): Boolean = blurred != null
+
+    fun set(bmp: Bitmap?, screenW: Int, screenH: Int) {
+        blurred = bmp
+        val extra = screenW * 0.03f
+        dst.set(-extra, -extra * 0.5f, screenW + extra, screenH + extra * 0.5f)
+    }
+
+    fun draw(c: Canvas, view: View, paint: Paint) {
+        val bmp = blurred ?: return
+        paint.colorFilter = filter
+        view.getLocationInWindow(loc)
+        c.save()
+        c.translate(-loc[0].toFloat(), -loc[1].toFloat())
+        BitmapUtil.drawCropped(c, bmp, dst, paint)
+        c.restore()
+    }
+}
+
+object BoxBlur {
+    fun blurred(src: Bitmap, targetW: Int, radius: Int, passes: Int): Bitmap {
+        val h = max(1, (src.height * targetW.toFloat() / src.width).roundToInt())
+        val small = Bitmap.createScaledBitmap(src, targetW, h, true)
+        val px = IntArray(targetW * h)
+        small.getPixels(px, 0, targetW, 0, 0, targetW, h)
+        for (i in 0 until passes) {
+            pass(px, targetW, h, radius, true)
+            pass(px, targetW, h, radius, false)
+        }
+        return Bitmap.createBitmap(px, targetW, h, Bitmap.Config.ARGB_8888)
+    }
+
+    private fun at(w: Int, line: Int, i: Int, horizontal: Boolean): Int = if (horizontal) line * w + i else i * w + line
+
+    private fun pass(px: IntArray, w: Int, h: Int, r: Int, horizontal: Boolean) {
+        val len = if (horizontal) w else h
+        val lines = if (horizontal) h else w
+        val tmp = IntArray(len)
+        val div = 2 * r + 1
+        for (line in 0 until lines) {
+            var sr = 0
+            var sg = 0
+            var sb = 0
+            for (i in -r..r) {
+                val p = px[at(w, line, i.coerceIn(0, len - 1), horizontal)]
+                sr += (p shr 16) and 255
+                sg += (p shr 8) and 255
+                sb += p and 255
+            }
+            for (i in 0 until len) {
+                tmp[i] = (0xFF shl 24) or ((sr / div) shl 16) or ((sg / div) shl 8) or (sb / div)
+                val add = px[at(w, line, min(i + r + 1, len - 1), horizontal)]
+                val rem = px[at(w, line, max(i - r, 0), horizontal)]
+                sr += ((add shr 16) and 255) - ((rem shr 16) and 255)
+                sg += ((add shr 8) and 255) - ((rem shr 8) and 255)
+                sb += (add and 255) - (rem and 255)
+            }
+            for (i in 0 until len) px[at(w, line, i, horizontal)] = tmp[i]
+        }
+    }
+}
+
+object PresetArt {
+    fun render(id: String, w: Int, h: Int): Bitmap = when (id) {
+        "aurora" -> aurora(w, h)
+        "sunset" -> sunset(w, h)
+        "midnight" -> midnight(w, h)
+        "graphite" -> graphite(w, h)
+        else -> WallpaperArt.render(w, h)
+    }
+
+    private fun canvasFor(w: Int, h: Int): Pair<Bitmap, Canvas> {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        return Pair(bmp, Canvas(bmp))
+    }
+
+    private fun aurora(w: Int, h: Int): Bitmap {
+        val (bmp, c) = canvasFor(w, h)
+        val wf = w.toFloat()
+        val hf = h.toFloat()
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(
+            0f, 0f, 0f, hf, intArrayOf(0xFF040914.toInt(), 0xFF0A1F2E.toInt(), 0xFF03060D.toInt()),
+            floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, hf, p)
+        val colors = intArrayOf(0xFF3DF2B0.toInt(), 0xFF2FB8E8.toInt(), 0xFF8E5BFF.toInt(), 0xFF3DF2B0.toInt(), 0xFFB05BFF.toInt())
+        val path = Path()
+        for (k in 0 until 5) {
+            val baseY = hf * (0.16f + 0.10f * k)
+            val amp = hf * (0.05f + 0.018f * k)
+            val freq = TAU / wf * (1.1f + 0.28f * k)
+            val phase = k * 1.1f
+            val thick = hf * 0.24f
+            path.reset()
+            var x = 0f
+            path.moveTo(0f, baseY + sin(phase) * amp)
+            while (x <= wf) {
+                path.lineTo(x, baseY + sin(x * freq + phase) * amp)
+                x += 10f
+            }
+            x = wf
+            while (x >= 0f) {
+                path.lineTo(x, baseY + thick + sin(x * freq + phase + 0.6f) * amp)
+                x -= 10f
+            }
+            path.close()
+            val col = colors[k]
+            p.shader = LinearGradient(
+                0f, baseY - amp, 0f, baseY + thick + amp,
+                intArrayOf(Ui.alpha(col, 0f), Ui.alpha(col, 0.5f), Ui.alpha(col, 0f)), null, Shader.TileMode.CLAMP
+            )
+            c.drawPath(path, p)
+        }
+        p.shader = RadialGradient(
+            wf * 0.5f, hf * 0.3f, wf * 0.6f,
+            intArrayOf(Color.argb(60, 90, 255, 200), Color.argb(0, 90, 255, 200)), null, Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, hf, p)
+        return bmp
+    }
+
+    private fun sunset(w: Int, h: Int): Bitmap {
+        val (bmp, c) = canvasFor(w, h)
+        val wf = w.toFloat()
+        val hf = h.toFloat()
+        val rnd = java.util.Random(5L)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        val horizon = hf * 0.64f
+        p.shader = LinearGradient(
+            0f, 0f, 0f, horizon,
+            intArrayOf(0xFF2B1B4D.toInt(), 0xFF8A2F6B.toInt(), 0xFFE8604C.toInt(), 0xFFFFB35C.toInt()),
+            floatArrayOf(0f, 0.42f, 0.78f, 1f), Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, horizon + 2f, p)
+        p.shader = RadialGradient(
+            wf * 0.5f, horizon, hf * 0.5f,
+            intArrayOf(Color.argb(230, 255, 232, 170), Color.argb(90, 255, 160, 100), Color.argb(0, 255, 140, 90)),
+            floatArrayOf(0f, 0.35f, 1f), Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, hf, p)
+        p.shader = null
+        p.color = Color.argb(255, 255, 240, 200)
+        c.drawCircle(wf * 0.5f, horizon - hf * 0.01f, hf * 0.07f, p)
+        val ridges = intArrayOf(0xFF5A2358.toInt(), 0xFF33173F.toInt(), 0xFF170B25.toInt())
+        val path = Path()
+        for (layer in 0 until 3) {
+            val base = horizon - hf * (0.13f - 0.05f * layer)
+            path.reset()
+            path.moveTo(0f, hf)
+            var x = 0f
+            var y = base
+            while (x <= wf + 20f) {
+                y = (y + (rnd.nextFloat() - 0.5f) * hf * 0.05f).coerceIn(base - hf * 0.09f, base + hf * 0.06f)
+                path.lineTo(x, y)
+                x += wf / 36f
+            }
+            path.lineTo(wf, hf)
+            path.close()
+            p.color = ridges[layer]
+            c.drawPath(path, p)
+        }
+        return bmp
+    }
+
+    private fun midnight(w: Int, h: Int): Bitmap {
+        val (bmp, c) = canvasFor(w, h)
+        val wf = w.toFloat()
+        val hf = h.toFloat()
+        val rnd = java.util.Random(9L)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(0f, 0f, 0f, hf, 0xFF02030A.toInt(), 0xFF0B1230.toInt(), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, wf, hf, p)
+        val nebula = intArrayOf(0xFF4B3FD6.toInt(), 0xFFB03FA8.toInt(), 0xFF2F7BD6.toInt())
+        for (i in 0 until 3) {
+            val cx = wf * (0.2f + 0.3f * i)
+            val cy = hf * (0.3f + 0.25f * rnd.nextFloat())
+            p.shader = RadialGradient(
+                cx, cy, wf * 0.35f, intArrayOf(Ui.alpha(nebula[i], 0.38f), Ui.alpha(nebula[i], 0f)), null, Shader.TileMode.CLAMP
+            )
+            c.drawRect(0f, 0f, wf, hf, p)
+        }
+        p.shader = null
+        for (i in 0 until 420) {
+            p.color = Color.argb(60 + rnd.nextInt(190), 255, 255, 255)
+            c.drawCircle(wf * rnd.nextFloat(), hf * rnd.nextFloat(), hf * (0.0007f + 0.0016f * rnd.nextFloat()), p)
+        }
+        return bmp
+    }
+
+    private fun graphite(w: Int, h: Int): Bitmap {
+        val (bmp, c) = canvasFor(w, h)
+        val wf = w.toFloat()
+        val hf = h.toFloat()
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        p.shader = LinearGradient(0f, 0f, wf, hf, 0xFF22252D.toInt(), 0xFF0A0B0F.toInt(), Shader.TileMode.CLAMP)
+        c.drawRect(0f, 0f, wf, hf, p)
+        p.shader = RadialGradient(
+            wf * 0.85f, hf * 0.1f, wf * 0.55f,
+            intArrayOf(Color.argb(110, 80, 110, 170), Color.argb(0, 80, 110, 170)), null, Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, hf, p)
+        val sweep = Path()
+        sweep.moveTo(wf * 0.30f, 0f)
+        sweep.lineTo(wf * 0.55f, 0f)
+        sweep.lineTo(wf * 0.20f, hf)
+        sweep.lineTo(wf * -0.05f, hf)
+        sweep.close()
+        p.shader = LinearGradient(
+            wf * 0.3f, 0f, wf * 0.1f, hf, Color.argb(30, 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP
+        )
+        c.drawPath(sweep, p)
+        return bmp
+    }
+}
+
+class BgOption(val id: String, val name: String, val file: File?)
+
+class WallpaperStore(private val context: Context) {
+    private val prefs = context.getSharedPreferences("sambhav_launcher", Context.MODE_PRIVATE)
+    val dir: File = (context.getExternalFilesDir("backgrounds") ?: File(context.filesDir, "backgrounds")).also { it.mkdirs() }
+
+    fun currentId(): String = prefs.getString("bg_id", "sky") ?: "sky"
+
+    fun setCurrent(id: String) {
+        prefs.edit().putString("bg_id", id).apply()
+    }
+
+    fun options(): List<BgOption> {
+        val list = ArrayList<BgOption>()
+        for ((id, name) in PRESETS) list.add(BgOption(id, name, null))
+        val files = dir.listFiles { f -> f.isFile && IMAGE_EXT.any { f.name.lowercase(Locale.US).endsWith(it) } }
+        files?.sortedByDescending { it.lastModified() }?.forEach {
+            list.add(BgOption("file:" + it.name, it.nameWithoutExtension, it))
+        }
+        return list
+    }
+
+    fun render(id: String, w: Int, h: Int, reqW: Int): Bitmap {
+        if (id.startsWith("file:")) {
+            val file = File(dir, id.removePrefix("file:"))
+            val bmp = decodeFile(file, reqW, reqW * 9 / 16)
+            if (bmp != null) return bmp
+            setCurrent("sky")
+        }
+        return PresetArt.render(id.takeIf { !it.startsWith("file:") } ?: "sky", w, h)
+    }
+
+    fun thumbnail(option: BgOption): Bitmap {
+        val f = option.file
+        if (f != null) {
+            val bmp = decodeFile(f, 320, 180)
+            if (bmp != null) return bmp
+        }
+        return PresetArt.render(option.id, 320, 180)
+    }
+
+    fun decodeFile(file: File, reqW: Int, reqH: Int): Bitmap? {
+        if (!file.exists()) return null
+        val bounds = BitmapFactory.Options()
+        bounds.inJustDecodeBounds = true
+        BitmapFactory.decodeFile(file.absolutePath, bounds)
+        if (bounds.outWidth <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
+        val opts = BitmapFactory.Options()
+        opts.inSampleSize = sample
+        return BitmapFactory.decodeFile(file.absolutePath, opts)
+    }
+
+    /** Copies an image chosen through the system picker into the backgrounds folder, downscaled to 1920 px. */
+    fun import(uri: Uri): BgOption? {
+        val resolver = context.contentResolver
+        val bounds = BitmapFactory.Options()
+        bounds.inJustDecodeBounds = true
+        resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, bounds) }
+        if (bounds.outWidth <= 0) return null
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= 1920 && bounds.outHeight / (sample * 2) >= 1080) sample *= 2
+        val opts = BitmapFactory.Options()
+        opts.inSampleSize = sample
+        val bmp = resolver.openInputStream(uri)?.use { BitmapFactory.decodeStream(it, null, opts) } ?: return null
+        val file = File(dir, "custom_" + System.currentTimeMillis() + ".jpg")
+        FileOutputStream(file).use { bmp.compress(Bitmap.CompressFormat.JPEG, 92, it) }
+        bmp.recycle()
+        return BgOption("file:" + file.name, file.nameWithoutExtension, file)
+    }
+
+    fun delete(option: BgOption): Boolean = option.file?.delete() ?: false
+
+    companion object {
+        val PRESETS = listOf(
+            "sky" to "Blue Sky", "aurora" to "Aurora", "sunset" to "Sunset",
+            "midnight" to "Midnight", "graphite" to "Graphite"
+        )
+        private val IMAGE_EXT = listOf(".jpg", ".jpeg", ".png", ".webp")
+    }
+}
+
+fun View.invalidateTree() {
+    invalidate()
+    if (this is ViewGroup) {
+        for (i in 0 until childCount) getChildAt(i).invalidateTree()
+    }
+}
+
+// =====================================================================================
+//  SECTION 10 - Glass sheets and the background menu
+// =====================================================================================
+
+/** Full screen sheet: blurred wallpaper, soft dim and a large glass pane. */
+open class SheetLayout(context: Context, private val panelFor: (Int, Int) -> RectF) : FrameLayout(context) {
+    private val surface = GlassSurface(GlassSurface.Tone.FROST).attach(this)
+    private val backdropPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+
+    init {
+        setWillNotDraw(false)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        val r = panelFor(w, h)
+        surface.layout(r.left, r.top, r.right, r.bottom, Ui.s(48f))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        if (Backdrop.isReady()) {
+            backdropPaint.alpha = 255
+            Backdrop.draw(canvas, this, backdropPaint)
+        } else {
+            canvas.drawColor(Color.BLACK)
+        }
+        canvas.drawColor(Ui.alpha(Color.BLACK, 0.36f))
+        surface.drawBase(canvas, 0f)
+        surface.drawGloss(canvas, 0f)
+    }
+}
+
+class BgCard(context: Context, val option: BgOption?, private val thumb: Bitmap?) : FocusGlassView(context, 1.08f, Ui.s(4f)) {
+    private val bleed = Ui.s(TILE_BLEED)
+    private val cardW = Ui.s(320)
+    private val cardH = Ui.s(180)
+    private val labelH = Ui.s(52)
+    val tileWidth: Int = (cardW + bleed * 2).roundToInt()
+    val tileHeight: Int = heightFor()
+    private val title = option?.name ?: "Choose Image"
+    private val surface = GlassSurface(GlassSurface.Tone.FROST).attach(this)
+    private val cardRect = RectF()
+    private val mediaPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val dimPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val badgePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tickPath = Path()
+    private val labelPaint = Ui.textPaint(Ui.s(23f), Color.WHITE, Fonts.medium)
+    private var labelText = title
+    var selectedBg = false
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    init {
+        contentDescription = title
+        dimPaint.color = Color.BLACK
+        linePaint.style = Paint.Style.STROKE
+        linePaint.strokeCap = Paint.Cap.ROUND
+        linePaint.color = Color.WHITE
+        badgePaint.color = Color.WHITE
+        labelPaint.textAlign = Paint.Align.CENTER
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(tileWidth, tileHeight)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        cardRect.set(bleed, bleed, w - bleed, bleed + cardH)
+        surface.layout(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom, Ui.s(22f))
+        pivotX = w / 2f
+        pivotY = cardRect.centerY()
+        labelText = TextUtils.ellipsize(title, labelPaint, cardW, TextUtils.TruncateAt.END).toString()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val f = focusFraction
+        surface.drawBase(canvas, f)
+        canvas.save()
+        surface.clipTo(canvas)
+        if (thumb != null) {
+            BitmapUtil.drawCropped(canvas, thumb, cardRect, mediaPaint)
+        } else {
+            linePaint.strokeWidth = Ui.s(5f)
+            linePaint.alpha = 225
+            val arm = Ui.s(26f)
+            canvas.drawLine(cardRect.centerX() - arm, cardRect.centerY(), cardRect.centerX() + arm, cardRect.centerY(), linePaint)
+            canvas.drawLine(cardRect.centerX(), cardRect.centerY() - arm, cardRect.centerX(), cardRect.centerY() + arm, linePaint)
+        }
+        dimPaint.alpha = ((1f - f) * 56f).toInt()
+        canvas.drawRect(cardRect, dimPaint)
+        canvas.restore()
+        surface.drawGloss(canvas, f)
+        if (selectedBg) {
+            val cx = cardRect.right - Ui.s(30f)
+            val cy = cardRect.top + Ui.s(30f)
+            canvas.drawCircle(cx, cy, Ui.s(16f), badgePaint)
+            linePaint.strokeWidth = Ui.s(3.5f)
+            linePaint.color = Color.rgb(12, 13, 18)
+            tickPath.reset()
+            tickPath.moveTo(cx - Ui.s(7f), cy)
+            tickPath.lineTo(cx - Ui.s(2f), cy + Ui.s(6f))
+            tickPath.lineTo(cx + Ui.s(8f), cy - Ui.s(6f))
+            canvas.drawPath(tickPath, linePaint)
+            linePaint.color = Color.WHITE
+        }
+        labelPaint.alpha = (255f * (0.6f + 0.4f * f)).toInt()
+        canvas.drawText(labelText, width / 2f, cardRect.bottom + Ui.s(14f) - labelPaint.ascent(), labelPaint)
+    }
+
+    companion object {
+        fun heightFor(): Int = (Ui.s(180) + Ui.s(TILE_BLEED) * 2 + Ui.s(52)).roundToInt()
+    }
+}
+
+class MenuTitleView(context: Context) : View(context) {
+    var hint: String = ""
+    private val titlePaint = Ui.textPaint(Ui.s(52f), Color.WHITE, Fonts.light, -0.01f)
+    private val hintPaint = Ui.textPaint(Ui.s(21f), Ui.alpha(Color.WHITE, 0.6f), Fonts.regular, 0.01f)
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(170))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val x = Ui.s(96f)
+        canvas.drawText("Background", x, Ui.s(84f), titlePaint)
+        canvas.drawText("Pick a preset or choose your own image. Hold OK on a custom image to delete it.", x, Ui.s(124f), hintPaint)
+        val path = TextUtils.ellipsize(hint, hintPaint, width - x * 2, TextUtils.TruncateAt.MIDDLE).toString()
+        canvas.drawText(path, x, Ui.s(154f), hintPaint)
+    }
+}
+
+class BackgroundMenu(
+    context: Context,
+    private val onSelect: (BgOption) -> Unit,
+    private val onPick: () -> Unit,
+    private val onDelete: (BgOption) -> Unit
+) : SheetLayout(context, { w, h ->
+    val ph = Ui.s(560f)
+    RectF(Ui.s(40f), (h - ph) / 2f, w - Ui.s(40f), (h + ph) / 2f)
+}) {
+    private val column = LinearLayout(context)
+    private val title = MenuTitleView(context)
+    private var row: CarouselRow? = null
+    private var preferred: View? = null
+    var isOpen = false
+        private set
+
+    init {
+        visibility = View.GONE
+        column.orientation = LinearLayout.VERTICAL
+        column.clipChildren = false
+        column.addView(title, LinearLayout.LayoutParams(MATCH, Ui.px(170)))
+        val lp = FrameLayout.LayoutParams(MATCH, WRAP)
+        lp.gravity = Gravity.CENTER_VERTICAL
+        addView(column, lp)
+    }
+
+    fun preferredFocus(): View? = preferred
+
+    fun populate(options: List<BgOption>, thumbs: Map<String, Bitmap>, currentId: String, folder: String) {
+        title.hint = "Your folder: " + folder
+        title.invalidate()
+        row?.let { column.removeView(it) }
+        val carousel = CarouselRow(context, BgCard.heightFor(), Ui.s(96f) - Ui.s(TILE_BLEED))
+        preferred = null
+        for (opt in options) {
+            val card = BgCard(context, opt, thumbs[opt.id])
+            card.focusKey = "bg:" + opt.id
+            card.selectedBg = opt.id == currentId
+            card.setOnClickListener { onSelect(opt) }
+            if (opt.file != null) {
+                card.isLongClickable = true
+                card.setOnLongClickListener {
+                    onDelete(opt)
+                    true
+                }
+            }
+            carousel.track.addView(card, LinearLayout.LayoutParams(card.tileWidth, card.tileHeight))
+            if (card.selectedBg) preferred = card
+        }
+        val pick = BgCard(context, null, null)
+        pick.focusKey = "bg:pick"
+        pick.setOnClickListener { onPick() }
+        carousel.track.addView(pick, LinearLayout.LayoutParams(pick.tileWidth, pick.tileHeight))
+        if (preferred == null) preferred = carousel.track.getChildAt(0)
+        column.addView(carousel, LinearLayout.LayoutParams(MATCH, BgCard.heightFor()))
+        row = carousel
+    }
+
+    fun open() {
+        isOpen = true
+        animate().cancel()
+        visibility = View.VISIBLE
+        alpha = 0f
+        animate().alpha(1f).setDuration(260L).start()
+    }
+
+    fun close() {
+        isOpen = false
+        animate().cancel()
+        animate().alpha(0f).setDuration(200L).withEndAction {
+            if (!isOpen) visibility = View.GONE
+        }.start()
     }
 }
