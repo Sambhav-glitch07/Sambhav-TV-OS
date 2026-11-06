@@ -1,0 +1,9 @@
+<resources>
+    <style name="Theme.Sambhav" parent="@android:style/Theme.Material.NoActionBar">
+        <item name="android:windowBackground">@color/sambhav_black</item>
+        <item name="android:colorBackground">@color/sambhav_black</item>
+        <item name="android:windowNoTitle">true</item>
+        <item name="android:windowActionBar">false</item>
+        <item name="android:windowFullscreen">true</item>
+    </style>
+</resources>
