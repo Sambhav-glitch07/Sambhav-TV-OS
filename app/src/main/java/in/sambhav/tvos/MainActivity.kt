@@ -981,6 +981,74 @@ abstract class FocusGlassView(context: Context, maxScale: Float, lift: Float) : 
 }
 
 
+/** Horizontal carousel with eased scrolling driven by focus rather than touch. */
+class CarouselRow(context: Context, val rowHeight: Int, private val edgeInset: Float) : FrameLayout(context) {
+    val track = LinearLayout(context)
+    private var offset = 0f
+    private var animator: ValueAnimator? = null
+
+    init {
+        clipChildren = false
+        clipToPadding = false
+        track.orientation = LinearLayout.HORIZONTAL
+        track.clipChildren = false
+        track.clipToPadding = false
+        track.setPadding(edgeInset.roundToInt(), 0, edgeInset.roundToInt(), 0)
+        addView(track, FrameLayout.LayoutParams(WRAP, rowHeight))
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        track.measure(
+            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
+            MeasureSpec.makeMeasureSpec(rowHeight, MeasureSpec.EXACTLY)
+        )
+        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), rowHeight)
+    }
+
+    override fun requestChildFocus(child: View?, focused: View?) {
+        super.requestChildFocus(child, focused)
+        if (focused == null) return
+        var node: View? = focused
+        while (node != null && node.parent !== track) node = node.parent as? View
+        val item = node ?: return
+        reveal(item)
+    }
+
+    private fun reveal(item: View) {
+        val viewport = width.toFloat()
+        val maxScroll = max(0f, track.measuredWidth - viewport)
+        var target = offset
+        val left = item.left.toFloat()
+        val right = item.right.toFloat()
+        if (left - target < edgeInset) {
+            target = left - edgeInset
+        } else if (right - target > viewport - edgeInset) {
+            target = right - viewport + edgeInset
+        }
+        target = target.coerceIn(0f, maxScroll)
+        animateTo(target)
+    }
+
+    private fun animateTo(target: Float) {
+        if (abs(target - offset) < 1f) return
+        animator?.cancel()
+        val a = ValueAnimator.ofFloat(offset, target)
+        a.duration = 340L
+        a.interpolator = DecelerateInterpolator(2f)
+        a.addUpdateListener {
+            offset = it.animatedValue as Float
+            track.translationX = -offset
+        }
+        animator = a
+        a.start()
+    }
+
+    override fun onDetachedFromWindow() {
+        animator?.cancel()
+        super.onDetachedFromWindow()
+    }
+}
+
 /** Vertical page container. Scrolls whole sections into view and reports offset for parallax. */
 class VerticalStage(context: Context) : FrameLayout(context) {
     val column = LinearLayout(context)
