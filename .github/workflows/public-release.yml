@@ -1,0 +1,48 @@
+
+name: Publish Sambhav TV OS Release
+
+on:
+  workflow_run:
+    workflows: ["Build Sambhav TV OS APK"]
+    types:
+      - completed
+    branches:
+      - main
+
+permissions:
+  contents: write
+  actions: read
+
+jobs:
+  publish:
+    if: ${{ github.event.workflow_run.conclusion == 'success' }}
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Download APK artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: Sambhav-TV-OS-debug-apk
+          run-id: ${{ github.event.workflow_run.id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+          path: ./apk
+
+      - name: Find APK
+        id: apk
+        run: |
+          FILE=$(find ./apk -name "*.apk" -type f | head -n 1)
+          if [ -z "$FILE" ]; then
+            echo "APK not found"
+            exit 1
+          fi
+          echo "file=$FILE" >> "$GITHUB_OUTPUT"
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          TAG="build-${{ github.event.workflow_run.run_number }}"
+          gh release create "$TAG" "${{ steps.apk.outputs.file }}" \
+            --repo "${{ github.repository }}" \
+            --title "Sambhav TV OS - $TAG" \
+            --notes "Download Sambhav TV OS APK."
