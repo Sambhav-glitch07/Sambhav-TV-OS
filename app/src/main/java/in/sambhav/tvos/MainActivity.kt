@@ -12,6 +12,7 @@ import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.BitmapShader
 import android.graphics.Canvas
 import android.graphics.Color
@@ -19,8 +20,6 @@ import android.graphics.LinearGradient
 import android.graphics.Matrix
 import android.graphics.Paint
 import android.graphics.Path
-import android.graphics.PorterDuff
-import android.graphics.PorterDuffXfermode
 import android.graphics.RadialGradient
 import android.graphics.Rect
 import android.graphics.RectF
@@ -28,12 +27,17 @@ import android.graphics.Shader
 import android.graphics.Typeface
 import android.graphics.drawable.ColorDrawable
 import android.graphics.drawable.Drawable
-import android.graphics.drawable.GradientDrawable
+import android.media.MediaMetadata
+import android.media.session.MediaController
+import android.media.session.MediaSessionManager
+import android.media.session.PlaybackState
 import android.os.Build
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
+import android.os.SystemClock
 import android.provider.Settings
+import android.service.notification.NotificationListenerService
 import android.text.TextPaint
 import android.text.TextUtils
 import android.text.format.DateFormat
@@ -62,21 +66,22 @@ import kotlin.math.roundToInt
 import kotlin.math.sin
 
 // =====================================================================================
-//  Sambhav TV OS  -  cinematic glass launcher for Android TV (API 28+)
-//  Every surface is drawn natively with Canvas; there are no layout XML files, no
-//  WebView and no third party libraries.
+//  Sambhav TV OS  -  wallpaper + glass dock launcher for Android TV (API 28+)
+//  Native Views only. Every surface is drawn with Canvas. No WebView, Compose or
+//  third party libraries.
+//
+//  Optional: drop your own picture at app/src/main/res/drawable-nodpi/wallpaper.jpg
+//  and it is used automatically instead of the built in sky scene.
 // =====================================================================================
 
 private const val MATCH = ViewGroup.LayoutParams.MATCH_PARENT
 private const val WRAP = ViewGroup.LayoutParams.WRAP_CONTENT
 private const val TILE_BLEED = 26f
-private const val HERO_HEIGHT = 700
-private const val SECTION_HEADER_HEIGHT = 84
-private const val PAGE_TITLE_HEIGHT = 262
 private val TAU = (2.0 * PI).toFloat()
+private val SPOTIFY_GREEN = 0xFF1ED760.toInt()
 
 // =====================================================================================
-//  SECTION 1 - Design tokens and helpers
+//  SECTION 1 - Design tokens, glass engine, glyphs, discovery, focus engine
 // =====================================================================================
 
 object Fonts {
@@ -402,7 +407,7 @@ class GlassSurface(private val tone: Tone) {
 //  SECTION 3 - Vector glyphs, brand mark and icon plates
 // =====================================================================================
 
-enum class Glyph { PLAY, GRID, INFO, WIFI, DISPLAY, SOUND, BLUETOOTH, CLOCK, SLIDERS, REFRESH, CLEAR }
+enum class Glyph { PLAY, GRID, INFO, WIFI, DISPLAY, SOUND, BLUETOOTH, CLOCK, SLIDERS, REFRESH, CLEAR, GEAR, INPUT, PREV, NEXT, PAUSE }
 
 object GlyphPainter {
     private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
@@ -531,6 +536,60 @@ object GlyphPainter {
                 c.drawLine(cx - h * 0.38f, cy - h * 0.38f, cx + h * 0.38f, cy + h * 0.38f, paint)
                 c.drawLine(cx - h * 0.38f, cy + h * 0.38f, cx + h * 0.38f, cy - h * 0.38f, paint)
             }
+            Glyph.GEAR -> {
+                c.drawCircle(cx, cy, h * 0.34f, paint)
+                c.drawCircle(cx, cy, h * 0.66f, paint)
+                paint.strokeWidth = max(2f, size * 0.12f)
+                for (k in 0 until 8) {
+                    val a = Math.toRadians(k * 45.0)
+                    c.drawLine(
+                        cx + (h * 0.72 * cos(a)).toFloat(), cy + (h * 0.72 * sin(a)).toFloat(),
+                        cx + (h * 0.98 * cos(a)).toFloat(), cy + (h * 0.98 * sin(a)).toFloat(), paint
+                    )
+                }
+            }
+            Glyph.INPUT -> {
+                box.set(cx - h * 0.95f, cy - h * 0.72f, cx + h * 0.95f, cy + h * 0.5f)
+                c.drawRoundRect(box, h * 0.16f, h * 0.16f, paint)
+                c.drawLine(cx - h * 0.4f, cy + h * 0.85f, cx + h * 0.4f, cy + h * 0.85f, paint)
+                paint.style = Paint.Style.FILL
+                path.reset()
+                path.moveTo(cx - h * 0.2f, cy - h * 0.4f)
+                path.lineTo(cx - h * 0.2f, cy + h * 0.18f)
+                path.lineTo(cx + h * 0.32f, cy - h * 0.11f)
+                path.close()
+                c.drawPath(path, paint)
+            }
+            Glyph.PREV -> {
+                paint.style = Paint.Style.FILL_AND_STROKE
+                paint.strokeWidth = size * 0.05f
+                c.drawLine(cx - h * 0.62f, cy - h * 0.62f, cx - h * 0.62f, cy + h * 0.62f, paint)
+                path.reset()
+                path.moveTo(cx + h * 0.66f, cy - h * 0.66f)
+                path.lineTo(cx + h * 0.66f, cy + h * 0.66f)
+                path.lineTo(cx - h * 0.34f, cy)
+                path.close()
+                c.drawPath(path, paint)
+            }
+            Glyph.NEXT -> {
+                paint.style = Paint.Style.FILL_AND_STROKE
+                paint.strokeWidth = size * 0.05f
+                c.drawLine(cx + h * 0.62f, cy - h * 0.62f, cx + h * 0.62f, cy + h * 0.62f, paint)
+                path.reset()
+                path.moveTo(cx - h * 0.66f, cy - h * 0.66f)
+                path.lineTo(cx - h * 0.66f, cy + h * 0.66f)
+                path.lineTo(cx + h * 0.34f, cy)
+                path.close()
+                c.drawPath(path, paint)
+            }
+            Glyph.PAUSE -> {
+                paint.style = Paint.Style.FILL
+                for (side in intArrayOf(-1, 1)) {
+                    val l = if (side < 0) cx - h * 0.62f else cx + h * 0.2f
+                    box.set(l, cy - h * 0.7f, l + h * 0.42f, cy + h * 0.7f)
+                    c.drawRoundRect(box, h * 0.1f, h * 0.1f, paint)
+                }
+            }
         }
     }
 }
@@ -620,190 +679,6 @@ object IconPlate {
     }
 }
 
-// =====================================================================================
-//  SECTION 4 - Ambient background and procedural artwork
-// =====================================================================================
-
-class AmbientBackgroundView(context: Context) : View(context) {
-    private var colorA = Palette.silver
-    private var colorB = Palette.secondary(Palette.silver)
-    private var targetA = colorA
-    private var targetB = colorB
-    private var phase = 0f
-    private var running = false
-    private var glowRadius = 0f
-    private var transition: ValueAnimator? = null
-    private val basePaint = Paint()
-    private val glowPaintA = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val glowPaintB = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val vignettePaint = Paint()
-    private val tick = object : Runnable {
-        override fun run() {
-            if (!running) return
-            phase = (phase + 0.0016f) % 1f
-            invalidate()
-            postDelayed(this, 66L)
-        }
-    }
-
-    init {
-        isFocusable = false
-    }
-
-    fun setRunning(value: Boolean) {
-        if (value == running) return
-        running = value
-        removeCallbacks(tick)
-        if (value) postDelayed(tick, 66L)
-    }
-
-    fun setColors(a: Int, b: Int) {
-        if (a == targetA && b == targetB) return
-        targetA = a
-        targetB = b
-        val fromA = colorA
-        val fromB = colorB
-        transition?.cancel()
-        val anim = ValueAnimator.ofFloat(0f, 1f)
-        anim.duration = 900L
-        anim.addUpdateListener {
-            val t = it.animatedFraction
-            colorA = Ui.lerpColor(fromA, a, t)
-            colorB = Ui.lerpColor(fromB, b, t)
-            rebuildGlows()
-            invalidate()
-        }
-        transition = anim
-        anim.start()
-    }
-
-    private fun rebuildGlows() {
-        if (width == 0 || height == 0) return
-        glowPaintA.shader = RadialGradient(
-            0f, 0f, glowRadius,
-            intArrayOf(Ui.alpha(colorA, 0.34f), Ui.alpha(colorA, 0.11f), Ui.alpha(colorA, 0f)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
-        )
-        glowPaintB.shader = RadialGradient(
-            0f, 0f, glowRadius * 0.85f,
-            intArrayOf(Ui.alpha(colorB, 0.26f), Ui.alpha(colorB, 0.08f), Ui.alpha(colorB, 0f)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
-        )
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        if (w <= 0 || h <= 0) return
-        glowRadius = max(w, h) * 0.62f
-        basePaint.shader = LinearGradient(
-            0f, 0f, 0f, h.toFloat(),
-            intArrayOf(0xFF111217.toInt(), 0xFF08090C.toInt(), 0xFF030304.toInt()),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
-        )
-        vignettePaint.shader = RadialGradient(
-            w / 2f, h / 2f, max(w, h) * 0.78f,
-            intArrayOf(0x00000000, 0x00000000, 0xB0000000.toInt()),
-            floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
-        )
-        rebuildGlows()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val w = width.toFloat()
-        val h = height.toFloat()
-        canvas.drawRect(0f, 0f, w, h, basePaint)
-        val a = phase * TAU
-        canvas.save()
-        canvas.translate(w * (0.78f + 0.06f * sin(a)), h * (0.16f + 0.05f * cos(a)))
-        canvas.drawCircle(0f, 0f, glowRadius, glowPaintA)
-        canvas.restore()
-        canvas.save()
-        canvas.translate(w * (0.14f + 0.05f * cos(a)), h * (0.96f + 0.03f * sin(a)))
-        canvas.drawCircle(0f, 0f, glowRadius * 0.85f, glowPaintB)
-        canvas.restore()
-        canvas.drawRect(0f, 0f, w, h, vignettePaint)
-    }
-
-    override fun onDetachedFromWindow() {
-        running = false
-        removeCallbacks(tick)
-        transition?.cancel()
-        super.onDetachedFromWindow()
-    }
-}
-
-object ArtFactory {
-    /** Renders cinematic hero artwork once, off the UI thread. Bottom edge fades to transparent. */
-    fun renderHero(w: Int, h: Int, accentA: Int, accentB: Int, seed: Int): Bitmap {
-        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
-        val c = Canvas(bmp)
-        val wf = w.toFloat()
-        val hf = h.toFloat()
-        val rnd = java.util.Random(seed.toLong())
-        val p = Paint(Paint.ANTI_ALIAS_FLAG)
-
-        p.shader = LinearGradient(0f, 0f, 0f, hf, Palette.darken(accentA, 0.78f), Palette.black, Shader.TileMode.CLAMP)
-        c.drawRect(0f, 0f, wf, hf, p)
-
-        p.shader = RadialGradient(
-            wf * 0.76f, hf * 0.30f, wf * 0.55f,
-            intArrayOf(Ui.alpha(accentA, 0.85f), Ui.alpha(accentA, 0.25f), Ui.alpha(accentA, 0f)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
-        )
-        c.drawRect(0f, 0f, wf, hf, p)
-
-        p.shader = RadialGradient(
-            wf * 0.30f, hf * 0.98f, wf * 0.5f,
-            intArrayOf(Ui.alpha(accentB, 0.55f), Ui.alpha(accentB, 0.14f), Ui.alpha(accentB, 0f)),
-            floatArrayOf(0f, 0.5f, 1f), Shader.TileMode.CLAMP
-        )
-        c.drawRect(0f, 0f, wf, hf, p)
-
-        val shard = Path()
-        for (i in 0 until 6) {
-            val x0 = wf * (0.35f + 0.65f * rnd.nextFloat())
-            val sw = wf * (0.05f + 0.14f * rnd.nextFloat())
-            val skew = wf * (0.10f + 0.18f * rnd.nextFloat())
-            shard.reset()
-            shard.moveTo(x0, 0f)
-            shard.lineTo(x0 + sw, 0f)
-            shard.lineTo(x0 + sw - skew, hf)
-            shard.lineTo(x0 - skew, hf)
-            shard.close()
-            p.shader = LinearGradient(
-                x0, 0f, x0 - skew, hf,
-                Color.argb(34 + rnd.nextInt(24), 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP
-            )
-            c.drawPath(shard, p)
-        }
-
-        p.shader = null
-        p.style = Paint.Style.STROKE
-        p.strokeWidth = hf * 0.004f + 1f
-        for (k in 1..4) {
-            p.color = Color.argb(30 - k * 5, 255, 255, 255)
-            c.drawCircle(wf * 0.76f, hf * 0.30f, hf * 0.22f * k, p)
-        }
-        p.style = Paint.Style.FILL
-
-        p.shader = LinearGradient(
-            0f, 0f, wf * 0.72f, 0f, Ui.alpha(Palette.black, 0.88f), Ui.alpha(Palette.black, 0f), Shader.TileMode.CLAMP
-        )
-        c.drawRect(0f, 0f, wf, hf, p)
-
-        p.shader = LinearGradient(
-            0f, hf * 0.5f, 0f, hf, Color.argb(0, 255, 255, 255), Color.argb(255, 255, 255, 255), Shader.TileMode.CLAMP
-        )
-        p.xfermode = PorterDuffXfermode(PorterDuff.Mode.DST_OUT)
-        c.drawRect(0f, hf * 0.5f, wf, hf, p)
-        p.xfermode = null
-        return bmp
-    }
-}
-
-// =====================================================================================
-//  SECTION 5 - Data model, discovery, persistence and launching
-// =====================================================================================
 
 enum class AppCategory(val displayName: String, val eyebrow: String) {
     VIDEO("Streaming and Video", "STREAMING"),
@@ -824,44 +699,6 @@ class AppEntry(
     val initial: String = label.trim().take(1).uppercase(Locale.getDefault())
 }
 
-class HeroItem(
-    val id: String,
-    val eyebrow: String,
-    val title: String,
-    val description: String,
-    val primaryLabel: String,
-    val primaryGlyph: Glyph,
-    val secondaryLabel: String,
-    val secondaryGlyph: Glyph,
-    val entry: AppEntry?,
-    val accentA: Int,
-    val accentB: Int,
-    val art: Bitmap
-)
-
-class SettingsAction(
-    val id: String,
-    val title: String,
-    val subtitle: String,
-    val glyph: Glyph,
-    val intentAction: String?
-)
-
-object SettingsCatalog {
-    val system: List<SettingsAction> = listOf(
-        SettingsAction("network", "Network", "Wi-Fi and Ethernet", Glyph.WIFI, Settings.ACTION_WIFI_SETTINGS),
-        SettingsAction("display", "Display", "Picture and resolution", Glyph.DISPLAY, Settings.ACTION_DISPLAY_SETTINGS),
-        SettingsAction("sound", "Sound", "Audio output", Glyph.SOUND, Settings.ACTION_SOUND_SETTINGS),
-        SettingsAction("bluetooth", "Bluetooth", "Remotes and speakers", Glyph.BLUETOOTH, Settings.ACTION_BLUETOOTH_SETTINGS),
-        SettingsAction("date", "Date and Time", "Clock and region", Glyph.CLOCK, Settings.ACTION_DATE_SETTINGS),
-        SettingsAction("apps", "Applications", "Manage installed apps", Glyph.GRID, Settings.ACTION_APPLICATION_SETTINGS),
-        SettingsAction("all", "All Settings", "System preferences", Glyph.SLIDERS, Settings.ACTION_SETTINGS)
-    )
-    val launcher: List<SettingsAction> = listOf(
-        SettingsAction("refresh", "Refresh Apps", "Scan installed applications", Glyph.REFRESH, null),
-        SettingsAction("clear", "Clear Recents", "Reset recently opened", Glyph.CLEAR, null)
-    )
-}
 
 class AppRepository(private val context: Context) {
     private val iconPx = 192
@@ -976,8 +813,8 @@ object AppLauncher {
         }
     }
 
-    fun openSetting(activity: Activity, action: SettingsAction): Boolean {
-        val candidates = listOfNotNull(action.intentAction, Settings.ACTION_SETTINGS)
+    fun openSetting(activity: Activity, actions: List<String>): Boolean {
+        val candidates = actions + Settings.ACTION_SETTINGS
         for (name in candidates) {
             try {
                 activity.startActivity(Intent(name).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
@@ -1002,80 +839,6 @@ object AppLauncher {
     }
 }
 
-object HeroFactory {
-    private val PRIORITY = listOf(
-        "com.google.android.youtube.tv", "com.netflix.ninja", "com.amazon.amazonvideo.livingroom",
-        "in.startv.hotstar", "com.disney.disneyplus", "com.jio.jioplay.tv", "com.sonyliv",
-        "com.graymatrix.did", "com.google.android.videos", "com.plexapp.android",
-        "com.spotify.tv.android", "org.videolan.vlc"
-    )
-
-    fun build(apps: List<AppEntry>): List<HeroItem> {
-        val out = ArrayList<HeroItem>()
-        val brandA = Color.rgb(84, 112, 168)
-        val brandB = Palette.secondary(brandA)
-        out.add(
-            HeroItem(
-                id = "brand",
-                eyebrow = "WELCOME",
-                title = "Sambhav TV OS",
-                description = "A calmer, more cinematic way to reach everything you watch, play and listen to.",
-                primaryLabel = "Explore Apps",
-                primaryGlyph = Glyph.GRID,
-                secondaryLabel = "Settings",
-                secondaryGlyph = Glyph.SLIDERS,
-                entry = null,
-                accentA = brandA,
-                accentB = brandB,
-                art = ArtFactory.renderHero(960, 380, brandA, brandB, 11)
-            )
-        )
-        val picks = ArrayList<AppEntry>()
-        for (name in PRIORITY) {
-            val match = apps.firstOrNull { it.packageName.startsWith(name) }
-            if (match != null && !picks.contains(match)) picks.add(match)
-        }
-        for (category in listOf(AppCategory.VIDEO, AppCategory.MUSIC, AppCategory.GAME)) {
-            for (app in apps) {
-                if (picks.size >= 4) break
-                if (app.category == category && !picks.contains(app)) picks.add(app)
-            }
-        }
-        if (picks.isEmpty()) picks.addAll(apps.take(2))
-        for (e in picks.take(4)) {
-            val a = e.accent
-            val b = Palette.secondary(a)
-            out.add(
-                HeroItem(
-                    id = e.packageName,
-                    eyebrow = e.category.eyebrow,
-                    title = e.label,
-                    description = describe(e),
-                    primaryLabel = "Open",
-                    primaryGlyph = Glyph.PLAY,
-                    secondaryLabel = "All Apps",
-                    secondaryGlyph = Glyph.GRID,
-                    entry = e,
-                    accentA = a,
-                    accentB = b,
-                    art = ArtFactory.renderHero(960, 380, a, b, e.packageName.hashCode())
-                )
-            )
-        }
-        return out
-    }
-
-    private fun describe(e: AppEntry): String = when (e.category) {
-        AppCategory.VIDEO -> "Movies, series and live channels in full resolution, ready the moment you are."
-        AppCategory.MUSIC -> "Your music and podcasts, brought to the big screen with room filling sound."
-        AppCategory.GAME -> "Pick up where you left off and play on the biggest screen in the house."
-        AppCategory.UTILITY -> "Open " + e.label + " directly from your Sambhav home screen."
-    }
-}
-
-// =====================================================================================
-//  SECTION 6 - Focus engine and scrolling containers
-// =====================================================================================
 
 class FocusDriver(private val view: View, private val maxScale: Float, private val lift: Float) {
     var fraction = 0f
@@ -1172,73 +935,6 @@ abstract class FocusGlassView(context: Context, maxScale: Float, lift: Float) : 
     }
 }
 
-/** Horizontal carousel with eased scrolling driven by focus rather than touch. */
-class CarouselRow(context: Context, val rowHeight: Int, private val edgeInset: Float) : FrameLayout(context) {
-    val track = LinearLayout(context)
-    private var offset = 0f
-    private var animator: ValueAnimator? = null
-
-    init {
-        clipChildren = false
-        clipToPadding = false
-        track.orientation = LinearLayout.HORIZONTAL
-        track.clipChildren = false
-        track.clipToPadding = false
-        track.setPadding(edgeInset.roundToInt(), 0, edgeInset.roundToInt(), 0)
-        addView(track, FrameLayout.LayoutParams(WRAP, rowHeight))
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        track.measure(
-            MeasureSpec.makeMeasureSpec(0, MeasureSpec.UNSPECIFIED),
-            MeasureSpec.makeMeasureSpec(rowHeight, MeasureSpec.EXACTLY)
-        )
-        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), rowHeight)
-    }
-
-    override fun requestChildFocus(child: View?, focused: View?) {
-        super.requestChildFocus(child, focused)
-        if (focused == null) return
-        var node: View? = focused
-        while (node != null && node.parent !== track) node = node.parent as? View
-        val item = node ?: return
-        reveal(item)
-    }
-
-    private fun reveal(item: View) {
-        val viewport = width.toFloat()
-        val maxScroll = max(0f, track.measuredWidth - viewport)
-        var target = offset
-        val left = item.left.toFloat()
-        val right = item.right.toFloat()
-        if (left - target < edgeInset) {
-            target = left - edgeInset
-        } else if (right - target > viewport - edgeInset) {
-            target = right - viewport + edgeInset
-        }
-        target = target.coerceIn(0f, maxScroll)
-        animateTo(target)
-    }
-
-    private fun animateTo(target: Float) {
-        if (abs(target - offset) < 1f) return
-        animator?.cancel()
-        val a = ValueAnimator.ofFloat(offset, target)
-        a.duration = 340L
-        a.interpolator = DecelerateInterpolator(2f)
-        a.addUpdateListener {
-            offset = it.animatedValue as Float
-            track.translationX = -offset
-        }
-        animator = a
-        a.start()
-    }
-
-    override fun onDetachedFromWindow() {
-        animator?.cancel()
-        super.onDetachedFromWindow()
-    }
-}
 
 /** Vertical page container. Scrolls whole sections into view and reports offset for parallax. */
 class VerticalStage(context: Context) : FrameLayout(context) {
@@ -1327,100 +1023,6 @@ class VerticalStage(context: Context) : FrameLayout(context) {
     }
 }
 
-// =====================================================================================
-//  SECTION 7 - Chrome: brand, navigation, clock, buttons, headers
-// =====================================================================================
-
-class BrandView(context: Context) : View(context) {
-    private val wordPaint = Ui.textPaint(Ui.s(30f), Color.WHITE, Fonts.medium, 0.30f)
-    private val subPaint = Ui.textPaint(Ui.s(30f), Ui.alpha(Color.WHITE, 0.5f), Fonts.light, 0.30f)
-    private val markRadius = Ui.s(24f)
-    private val pad = Ui.s(6f)
-    private val gap = Ui.s(18f)
-    private val wordWidth = wordPaint.measureText("SAMBHAV")
-    private val subWidth = subPaint.measureText("TV OS")
-    private val spaceWidth = Ui.s(14f)
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val w = pad * 2 + markRadius * 2 + gap + wordWidth + spaceWidth + subWidth
-        setMeasuredDimension(w.roundToInt(), Ui.px(64))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val cy = height / 2f
-        BrandMark.draw(canvas, pad + markRadius, cy, markRadius)
-        val x = pad + markRadius * 2 + gap
-        canvas.drawText("SAMBHAV", x, Ui.baseline(wordPaint, cy), wordPaint)
-        canvas.drawText("TV OS", x + wordWidth + spaceWidth, Ui.baseline(subPaint, cy), subPaint)
-    }
-}
-
-class ClockView(context: Context) : View(context) {
-    private val timePaint = Ui.textPaint(Ui.s(52f), Color.WHITE, Fonts.light, -0.01f)
-    private val periodPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.6f), Fonts.medium, 0.08f)
-    private val datePaint = Ui.textPaint(Ui.s(21f), Ui.alpha(Color.WHITE, 0.6f), Fonts.regular, 0.04f)
-    private var time = ""
-    private var period = ""
-    private var date = ""
-    private val ticker = object : Runnable {
-        override fun run() {
-            refresh()
-            postDelayed(this, 15_000L)
-        }
-    }
-
-    init {
-        timePaint.textAlign = Paint.Align.RIGHT
-        periodPaint.textAlign = Paint.Align.RIGHT
-        datePaint.textAlign = Paint.Align.RIGHT
-    }
-
-    fun refresh() {
-        val now = Date()
-        val locale = Locale.getDefault()
-        val newTime: String
-        val newPeriod: String
-        if (DateFormat.is24HourFormat(context)) {
-            newTime = SimpleDateFormat("HH:mm", locale).format(now)
-            newPeriod = ""
-        } else {
-            newTime = SimpleDateFormat("h:mm", locale).format(now)
-            newPeriod = SimpleDateFormat("a", locale).format(now).uppercase(locale)
-        }
-        val newDate = SimpleDateFormat("EEEE, d MMMM", locale).format(now)
-        if (newTime != time || newPeriod != period || newDate != date) {
-            time = newTime
-            period = newPeriod
-            date = newDate
-            invalidate()
-        }
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(Ui.px(320), Ui.px(92))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val right = width.toFloat() - Ui.s(4f)
-        var timeRight = right
-        if (period.isNotEmpty()) {
-            canvas.drawText(period, right, Ui.baseline(periodPaint, Ui.s(36f)) + Ui.s(8f), periodPaint)
-            timeRight = right - periodPaint.measureText(period) - Ui.s(10f)
-        }
-        canvas.drawText(time, timeRight, Ui.baseline(timePaint, Ui.s(36f)), timePaint)
-        canvas.drawText(date, right, Ui.baseline(datePaint, Ui.s(76f)), datePaint)
-    }
-
-    override fun onAttachedToWindow() {
-        super.onAttachedToWindow()
-        post(ticker)
-    }
-
-    override fun onDetachedFromWindow() {
-        removeCallbacks(ticker)
-        super.onDetachedFromWindow()
-    }
-}
 
 class GlassPanelLayout(
     context: Context,
@@ -1448,206 +1050,6 @@ class GlassPanelLayout(
     }
 }
 
-class NavTabView(context: Context, private val label: String) : FocusGlassView(context, 1.05f, 0f) {
-    var selectedTab = false
-        set(value) {
-            field = value
-            invalidate()
-        }
-    var onEnterContent: (() -> Unit)? = null
-    private val bleed = Ui.s(10f)
-    private val pillHeight = Ui.s(56f)
-    private val padX = Ui.s(30f)
-    private val surface = GlassSurface(GlassSurface.Tone.BRIGHT)
-    private val selectionPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val textPaint = Ui.textPaint(Ui.s(26f), Color.WHITE, Fonts.medium, 0.02f)
-    private val textWidth = textPaint.measureText(label)
-
-    init {
-        selectionPaint.color = Color.WHITE
-        contentDescription = label
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension((textWidth + padX * 2 + bleed * 2).roundToInt(), (pillHeight + bleed * 2).roundToInt())
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        surface.layout(bleed, bleed, w - bleed, h - bleed, pillHeight / 2f)
-        pivotX = w / 2f
-        pivotY = h / 2f
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val f = focusFraction
-        if (selectedTab && f < 0.99f) {
-            selectionPaint.alpha = ((1f - f) * 30f).toInt()
-            canvas.drawRoundRect(bleed, bleed, width - bleed, height - bleed, pillHeight / 2f, pillHeight / 2f, selectionPaint)
-        }
-        if (f > 0.01f) {
-            surface.drawBase(canvas, f, (f * 255f).toInt())
-            surface.drawGloss(canvas, f)
-        }
-        val base = if (selectedTab) 1f else 0.6f
-        val idle = Ui.alpha(Color.WHITE, base)
-        textPaint.color = Ui.lerpColor(idle, Color.rgb(12, 13, 18), f)
-        canvas.drawText(label, bleed + padX, Ui.baseline(textPaint, height / 2f), textPaint)
-    }
-
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_DPAD_DOWN || keyCode == KeyEvent.KEYCODE_DPAD_CENTER ||
-            keyCode == KeyEvent.KEYCODE_ENTER
-        ) {
-            onEnterContent?.invoke()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-}
-
-class GlassButton(
-    context: Context,
-    private var label: String,
-    private var glyph: Glyph,
-    private val primary: Boolean
-) : FocusGlassView(context, 1.07f, 0f) {
-    private val bleed = Ui.s(22f)
-    private val cardHeight = Ui.s(68f)
-    private val padX = Ui.s(32f)
-    private val glyphSize = Ui.s(24f)
-    private val gap = Ui.s(14f)
-    private val surface = GlassSurface(if (primary) GlassSurface.Tone.BRIGHT else GlassSurface.Tone.FROST)
-    private val textPaint = Ui.textPaint(Ui.s(26f), Color.WHITE, Fonts.medium, 0.02f)
-    private var textWidth = textPaint.measureText(label)
-
-    init {
-        contentDescription = label
-    }
-
-    fun setContent(newLabel: String, newGlyph: Glyph) {
-        label = newLabel
-        glyph = newGlyph
-        textWidth = textPaint.measureText(label)
-        contentDescription = label
-        requestLayout()
-        invalidate()
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val cardWidth = padX * 2 + glyphSize + gap + textWidth
-        setMeasuredDimension((cardWidth + bleed * 2).roundToInt(), (cardHeight + bleed * 2).roundToInt())
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        surface.layout(bleed, bleed, w - bleed, h - bleed, cardHeight / 2f)
-        pivotX = w / 2f
-        pivotY = h / 2f
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val f = focusFraction
-        surface.drawBase(canvas, f, if (primary) (205f + 50f * f).toInt() else 255)
-        surface.drawGloss(canvas, f)
-        val color = if (primary) Color.rgb(12, 13, 18) else Color.WHITE
-        val cy = height / 2f
-        val left = bleed + padX
-        GlyphPainter.draw(canvas, glyph, left + glyphSize / 2f, cy, glyphSize, color)
-        textPaint.color = color
-        canvas.drawText(label, left + glyphSize + gap, Ui.baseline(textPaint, cy), textPaint)
-    }
-}
-
-class PagerDotsView(context: Context, private val count: Int) : View(context) {
-    private var position = 0f
-    private var animator: ValueAnimator? = null
-    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val dot = Ui.s(9f)
-    private val active = Ui.s(34f)
-    private val gap = Ui.s(10f)
-
-    init {
-        paint.color = Color.WHITE
-    }
-
-    fun setPosition(target: Int, animate: Boolean) {
-        animator?.cancel()
-        if (!animate) {
-            position = target.toFloat()
-            invalidate()
-            return
-        }
-        val a = ValueAnimator.ofFloat(position, target.toFloat())
-        a.duration = 420L
-        a.interpolator = DecelerateInterpolator(1.6f)
-        a.addUpdateListener {
-            position = it.animatedValue as Float
-            invalidate()
-        }
-        animator = a
-        a.start()
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        val w = (count - 1) * (dot + gap) + active
-        setMeasuredDimension(w.roundToInt() + 2, Ui.px(12))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        var x = 0f
-        val cy = height / 2f
-        for (i in 0 until count) {
-            val weight = (1f - abs(i - position)).coerceIn(0f, 1f)
-            val w = Ui.lerp(dot, active, weight)
-            paint.alpha = (255f * (0.32f + 0.58f * weight)).toInt()
-            canvas.drawRoundRect(x, cy - dot / 2f, x + w, cy + dot / 2f, dot / 2f, dot / 2f, paint)
-            x += w + gap
-        }
-    }
-
-    override fun onDetachedFromWindow() {
-        animator?.cancel()
-        super.onDetachedFromWindow()
-    }
-}
-
-class SectionHeaderView(context: Context, private val title: String, private val subtitle: String?) : View(context) {
-    private val titlePaint = Ui.textPaint(Ui.s(34f), Ui.alpha(Color.WHITE, 0.96f), Fonts.medium, 0.005f)
-    private val subPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.45f), Fonts.regular, 0.02f)
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(SECTION_HEADER_HEIGHT))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val x = Ui.s(96f)
-        val y = Ui.s(52f)
-        canvas.drawText(title, x, y, titlePaint)
-        if (!subtitle.isNullOrEmpty()) {
-            canvas.drawText(subtitle, x + titlePaint.measureText(title) + Ui.s(20f), y, subPaint)
-        }
-    }
-}
-
-class PageTitleView(context: Context, private val title: String, private val subtitle: String) : View(context) {
-    private val titlePaint = Ui.textPaint(Ui.s(60f), Color.WHITE, Fonts.light, -0.01f)
-    private val subPaint = Ui.textPaint(Ui.s(25f), Ui.alpha(Color.WHITE, 0.55f), Fonts.regular, 0.01f)
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(PAGE_TITLE_HEIGHT))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val x = Ui.s(96f)
-        canvas.drawText(title, x, Ui.s(206f), titlePaint)
-        canvas.drawText(subtitle, x, Ui.s(246f), subPaint)
-    }
-}
-
-// =====================================================================================
-//  SECTION 8 - Application tiles, settings tiles and informational panels
-// =====================================================================================
 
 enum class TileStyle(val cardW: Int, val cardH: Int, val labelH: Int, val focusScale: Float) {
     LANDSCAPE(300, 169, 46, 1.09f),
@@ -1773,462 +1175,6 @@ class AppTile(
     }
 }
 
-class SettingsTile(context: Context, private val action: SettingsAction) : FocusGlassView(context, 1.08f, Ui.s(4f)) {
-    private val bleed = Ui.s(TILE_BLEED)
-    private val cardW = Ui.s(300)
-    private val cardH = Ui.s(190)
-    val tileWidth: Int = (cardW + bleed * 2).roundToInt()
-    val tileHeight: Int = heightFor()
-    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
-    private val cardRect = RectF()
-    private val titlePaint = Ui.textPaint(Ui.s(29f), Color.WHITE, Fonts.medium)
-    private val subPaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.55f), Fonts.regular, 0.01f)
-    private var titleText = action.title
-    private var subText = action.subtitle
-
-    init {
-        contentDescription = action.title
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(tileWidth, tileHeight)
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        cardRect.set(bleed, bleed, w - bleed, h - bleed)
-        surface.layout(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom, Ui.s(24f), Palette.silver)
-        pivotX = w / 2f
-        pivotY = h / 2f
-        val maxText = cardW - Ui.s(56f)
-        titleText = TextUtils.ellipsize(action.title, titlePaint, maxText, TextUtils.TruncateAt.END).toString()
-        subText = TextUtils.ellipsize(action.subtitle, subPaint, maxText, TextUtils.TruncateAt.END).toString()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        val f = focusFraction
-        surface.drawBase(canvas, f)
-        surface.drawGloss(canvas, f)
-        val x = cardRect.left + Ui.s(28f)
-        GlyphPainter.draw(
-            canvas, action.glyph, x + Ui.s(24f), cardRect.top + Ui.s(52f), Ui.s(48f),
-            Ui.alpha(Color.WHITE, 0.78f + 0.22f * f)
-        )
-        canvas.drawText(titleText, x, cardRect.bottom - Ui.s(62f), titlePaint)
-        canvas.drawText(subText, x, cardRect.bottom - Ui.s(28f), subPaint)
-    }
-
-    companion object {
-        fun heightFor(): Int = (Ui.s(190) + Ui.s(TILE_BLEED) * 2).roundToInt()
-    }
-}
-
-class InfoPanelView(context: Context, private val cells: List<Pair<String, String>>) : View(context) {
-    private val bleed = Ui.s(TILE_BLEED)
-    private val panelW = Ui.s(980)
-    private val panelH = Ui.s(190)
-    private val surface = GlassSurface(GlassSurface.Tone.FROST)
-    private val labelPaint = Ui.textPaint(Ui.s(16f), Ui.alpha(Color.WHITE, 0.5f), Fonts.medium, 0.18f)
-    private val valuePaint = Ui.textPaint(Ui.s(26f), Ui.alpha(Color.WHITE, 0.94f), Fonts.regular)
-
-    init {
-        isFocusable = false
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension((panelW + bleed * 2).roundToInt(), SettingsTile.heightFor())
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        surface.layout(bleed, bleed, w - bleed, h - bleed, Ui.s(24f))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        surface.drawBase(canvas, 0f)
-        surface.drawGloss(canvas, 0f)
-        val columns = 3
-        val colW = (panelW - Ui.s(64f)) / columns
-        for ((i, cell) in cells.withIndex()) {
-            val col = i % columns
-            val row = i / columns
-            val x = bleed + Ui.s(36f) + col * colW
-            val y = bleed + Ui.s(52f) + row * Ui.s(80f)
-            canvas.drawText(cell.first, x, y, labelPaint)
-            val value = TextUtils.ellipsize(cell.second, valuePaint, colW - Ui.s(24f), TextUtils.TruncateAt.END).toString()
-            canvas.drawText(value, x, y + Ui.s(34f), valuePaint)
-        }
-    }
-}
-
-class EmptyPanelView(context: Context, private val title: String, private val message: String) : View(context) {
-    private val bleed = Ui.s(TILE_BLEED)
-    private val surface = GlassSurface(GlassSurface.Tone.FROST)
-    private val titlePaint = Ui.textPaint(Ui.s(32f), Color.WHITE, Fonts.medium)
-    private val msgPaint = Ui.textPaint(Ui.s(23f), Ui.alpha(Color.WHITE, 0.6f), Fonts.regular, 0.01f)
-
-    init {
-        isFocusable = false
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension((Ui.s(900) + bleed * 2).roundToInt(), (Ui.s(150) + bleed * 2).roundToInt())
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        surface.layout(bleed, bleed, w - bleed, h - bleed, Ui.s(24f))
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        surface.drawBase(canvas, 0f)
-        surface.drawGloss(canvas, 0f)
-        GlyphPainter.draw(canvas, Glyph.INFO, bleed + Ui.s(70f), height / 2f, Ui.s(54f), Ui.alpha(Color.WHITE, 0.7f))
-        val x = bleed + Ui.s(130f)
-        canvas.drawText(title, x, height / 2f - Ui.s(6f), titlePaint)
-        canvas.drawText(message, x, height / 2f + Ui.s(34f), msgPaint)
-    }
-}
-
-// =====================================================================================
-//  SECTION 9 - Hero banner
-// =====================================================================================
-
-class HeroArtLayer(context: Context) : View(context) {
-    private var current: Bitmap? = null
-    private var previous: Bitmap? = null
-    private var fade = 1f
-    private var animator: ValueAnimator? = null
-    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
-    private val dst = RectF()
-
-    fun setArt(bmp: Bitmap, animate: Boolean) {
-        if (bmp === current) return
-        animator?.cancel()
-        if (!animate || current == null) {
-            previous = null
-            current = bmp
-            fade = 1f
-            invalidate()
-            return
-        }
-        previous = current
-        current = bmp
-        fade = 0f
-        val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = 700L
-        a.addUpdateListener {
-            fade = it.animatedValue as Float
-            invalidate()
-        }
-        animator = a
-        a.start()
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        dst.set(0f, 0f, width.toFloat(), height.toFloat())
-        val prev = previous
-        if (prev != null && fade < 1f) {
-            paint.alpha = 255
-            canvas.drawBitmap(prev, null, dst, paint)
-        }
-        val cur = current ?: return
-        paint.alpha = (fade * 255f).toInt()
-        canvas.drawBitmap(cur, null, dst, paint)
-    }
-
-    override fun onDetachedFromWindow() {
-        animator?.cancel()
-        super.onDetachedFromWindow()
-    }
-}
-
-class FeaturedCardView(context: Context) : View(context) {
-    private val bleed = Ui.s(44f)
-    private val cardW = Ui.s(600)
-    private val cardH = Ui.s(338)
-    val viewWidth: Int = (cardW + bleed * 2).roundToInt()
-    val viewHeight: Int = (cardH + bleed * 2).roundToInt()
-    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
-    private val mediaPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
-    private val glowPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val scrimPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val namePaint = Ui.textPaint(Ui.s(30f), Color.WHITE, Fonts.medium)
-    private val subPaint = Ui.textPaint(Ui.s(19f), Ui.alpha(Color.WHITE, 0.62f), Fonts.medium, 0.14f)
-    private var current: HeroItem? = null
-    private var previous: HeroItem? = null
-    private var progress = 1f
-    private var animator: ValueAnimator? = null
-
-    init {
-        isFocusable = false
-    }
-
-    fun setItem(item: HeroItem, animate: Boolean) {
-        if (item === current) return
-        animator?.cancel()
-        if (!animate || current == null) {
-            previous = null
-            current = item
-            progress = 1f
-            invalidate()
-            return
-        }
-        previous = current
-        current = item
-        progress = 0f
-        val a = ValueAnimator.ofFloat(0f, 1f)
-        a.duration = 560L
-        a.interpolator = DecelerateInterpolator(1.5f)
-        a.addUpdateListener {
-            progress = it.animatedValue as Float
-            invalidate()
-        }
-        animator = a
-        a.start()
-    }
-
-    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(viewWidth, viewHeight)
-    }
-
-    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
-        super.onSizeChanged(w, h, oldw, oldh)
-        surface.layout(bleed, bleed, w - bleed, h - bleed, Ui.s(32f))
-        scrimPaint.shader = LinearGradient(
-            0f, bleed + cardH * 0.55f, 0f, bleed + cardH,
-            Color.argb(0, 0, 0, 0), Color.argb(215, 0, 0, 0), Shader.TileMode.CLAMP
-        )
-    }
-
-    override fun onDraw(canvas: Canvas) {
-        surface.drawBase(canvas, 0f)
-        canvas.save()
-        surface.clipTo(canvas)
-        val r = surface.rect
-        val prev = previous
-        if (prev != null && progress < 1f) {
-            val layer = canvas.saveLayerAlpha(r.left, r.top, r.right, r.bottom, ((1f - progress) * 255f).toInt())
-            drawItem(canvas, prev)
-            canvas.restoreToCount(layer)
-        }
-        val cur = current
-        if (cur != null) {
-            val layer = canvas.saveLayerAlpha(r.left, r.top, r.right, r.bottom, (progress * 255f).toInt())
-            drawItem(canvas, cur)
-            canvas.restoreToCount(layer)
-        }
-        canvas.restore()
-        surface.drawGloss(canvas, 0f)
-    }
-
-    private fun drawItem(canvas: Canvas, item: HeroItem) {
-        val r = surface.rect
-        val entry = item.entry
-        val banner = entry?.banner
-        if (banner != null) {
-            BitmapUtil.drawCropped(canvas, banner, r, mediaPaint)
-        } else {
-            glowPaint.shader = RadialGradient(
-                r.centerX(), r.centerY() - r.height() * 0.1f, r.width() * 0.62f,
-                intArrayOf(Ui.alpha(item.accentA, 0.7f), Ui.alpha(item.accentB, 0.22f), Ui.alpha(item.accentB, 0f)),
-                floatArrayOf(0f, 0.55f, 1f), Shader.TileMode.CLAMP
-            )
-            canvas.drawRect(r, glowPaint)
-            if (entry == null) {
-                BrandMark.draw(canvas, r.centerX(), r.centerY() - r.height() * 0.08f, r.height() * 0.24f)
-            } else {
-                IconPlate.draw(
-                    canvas, entry.icon, entry.initial, entry.accent,
-                    r.centerX(), r.centerY() - r.height() * 0.08f, r.height() * 0.46f
-                )
-            }
-        }
-        canvas.drawRect(r, scrimPaint)
-        val x = r.left + Ui.s(32f)
-        canvas.drawText(item.eyebrow, x, r.bottom - Ui.s(62f), subPaint)
-        canvas.drawText(item.title, x, r.bottom - Ui.s(26f), namePaint)
-    }
-
-    override fun onDetachedFromWindow() {
-        animator?.cancel()
-        super.onDetachedFromWindow()
-    }
-}
-
-interface LauncherHost {
-    fun launchApp(entry: AppEntry)
-    fun openSetting(action: SettingsAction)
-    fun selectTab(index: Int, focusContent: Boolean)
-    fun onContentFocused(key: String, accentA: Int, accentB: Int)
-    fun onHeroItemChanged(item: HeroItem)
-}
-
-class HeroView(
-    context: Context,
-    private val items: List<HeroItem>,
-    private val host: LauncherHost
-) : FrameLayout(context) {
-    private val artLayer = HeroArtLayer(context)
-    private val card = FeaturedCardView(context)
-    private val column = LinearLayout(context)
-    private val eyebrow = Ui.makeText(context, "", Ui.s(21f), Ui.alpha(Color.WHITE, 0.62f), Fonts.medium, 0.24f)
-    private val title = Ui.makeText(context, "", Ui.s(80f), Color.WHITE, Fonts.light, -0.01f)
-    private val description = Ui.makeText(context, "", Ui.s(27f), Ui.alpha(Color.WHITE, 0.72f), Fonts.regular, 0.005f)
-    val primaryButton = GlassButton(context, "Open", Glyph.PLAY, true)
-    private val secondaryButton = GlassButton(context, "All Apps", Glyph.GRID, false)
-    private val dots = PagerDotsView(context, items.size)
-    private var index = 0
-    private var parallax = 0f
-    private val rotate = Runnable { autoAdvance() }
-
-    init {
-        clipChildren = false
-        clipToPadding = false
-        addView(artLayer, FrameLayout.LayoutParams(MATCH, MATCH))
-
-        val cardParams = FrameLayout.LayoutParams(card.viewWidth, card.viewHeight)
-        cardParams.gravity = Gravity.TOP or Gravity.END
-        cardParams.topMargin = Ui.px(190) - Ui.px(44)
-        cardParams.rightMargin = Ui.px(96) - Ui.px(44)
-        addView(card, cardParams)
-
-        column.orientation = LinearLayout.VERTICAL
-        column.clipChildren = false
-        column.clipToPadding = false
-        title.maxLines = 1
-        title.ellipsize = TextUtils.TruncateAt.END
-        description.maxLines = 3
-        description.ellipsize = TextUtils.TruncateAt.END
-        description.setLineSpacing(0f, 1.15f)
-        column.addView(eyebrow, LinearLayout.LayoutParams(WRAP, WRAP))
-        val titleParams = LinearLayout.LayoutParams(Ui.px(960), WRAP)
-        titleParams.topMargin = Ui.px(12)
-        column.addView(title, titleParams)
-        val descParams = LinearLayout.LayoutParams(Ui.px(780), WRAP)
-        descParams.topMargin = Ui.px(14)
-        column.addView(description, descParams)
-
-        val buttons = LinearLayout(context)
-        buttons.orientation = LinearLayout.HORIZONTAL
-        buttons.clipChildren = false
-        val buttonParams = LinearLayout.LayoutParams(WRAP, WRAP)
-        buttonParams.topMargin = Ui.px(20)
-        buttonParams.leftMargin = -Ui.px(22)
-        column.addView(buttons, buttonParams)
-        buttons.addView(primaryButton, LinearLayout.LayoutParams(WRAP, WRAP))
-        buttons.addView(secondaryButton, LinearLayout.LayoutParams(WRAP, WRAP))
-
-        val dotParams = LinearLayout.LayoutParams(WRAP, WRAP)
-        dotParams.topMargin = Ui.px(2)
-        column.addView(dots, dotParams)
-
-        val columnParams = FrameLayout.LayoutParams(Ui.px(1000), WRAP)
-        columnParams.leftMargin = Ui.px(96)
-        columnParams.topMargin = Ui.px(220)
-        addView(column, columnParams)
-
-        primaryButton.focusKey = "hero:primary"
-        secondaryButton.focusKey = "hero:secondary"
-        primaryButton.onFocusGained = { announceFocus("hero:primary") }
-        secondaryButton.onFocusGained = { announceFocus("hero:secondary") }
-        primaryButton.setOnClickListener { onPrimary() }
-        secondaryButton.setOnClickListener { onSecondary() }
-        primaryButton.onEdgeKey = { key -> if (key == KeyEvent.KEYCODE_DPAD_LEFT) { step(-1); true } else false }
-        secondaryButton.onEdgeKey = { key -> if (key == KeyEvent.KEYCODE_DPAD_RIGHT) { step(1); true } else false }
-
-        if (items.isNotEmpty()) apply(0, false, 1)
-    }
-
-    fun currentItem(): HeroItem? = items.getOrNull(index)
-
-    private fun announceFocus(key: String) {
-        val item = currentItem() ?: return
-        host.onContentFocused(key, item.accentA, item.accentB)
-    }
-
-    private fun onPrimary() {
-        val item = currentItem() ?: return
-        val entry = item.entry
-        if (entry != null) host.launchApp(entry) else host.selectTab(3, true)
-    }
-
-    private fun onSecondary() {
-        val item = currentItem() ?: return
-        if (item.entry != null) host.selectTab(3, true) else host.selectTab(4, true)
-    }
-
-    private fun step(direction: Int) {
-        if (items.size < 2) return
-        apply((index + direction + items.size) % items.size, true, direction)
-        restartRotation()
-    }
-
-    private fun autoAdvance() {
-        if (items.size > 1 && isShown && parallax < Ui.s(120f)) {
-            apply((index + 1) % items.size, true, 1)
-        }
-        startRotation()
-    }
-
-    private fun apply(newIndex: Int, animate: Boolean, direction: Int) {
-        val item = items[newIndex]
-        index = newIndex
-        artLayer.setArt(item.art, animate)
-        card.setItem(item, animate)
-        dots.setPosition(newIndex, animate)
-        if (animate) {
-            column.animate().cancel()
-            val shift = direction * Ui.s(24f)
-            column.animate().alpha(0f).translationX(-shift).setDuration(150L).withEndAction {
-                bindText(items[index])
-                column.translationX = shift
-                column.animate().alpha(1f).translationX(0f).setDuration(280L)
-                    .setInterpolator(DecelerateInterpolator(1.6f)).start()
-            }.start()
-        } else {
-            bindText(item)
-        }
-        host.onHeroItemChanged(item)
-    }
-
-    private fun bindText(item: HeroItem) {
-        eyebrow.text = item.eyebrow
-        title.text = item.title
-        description.text = item.description
-        primaryButton.setContent(item.primaryLabel, item.primaryGlyph)
-        secondaryButton.setContent(item.secondaryLabel, item.secondaryGlyph)
-    }
-
-    fun applyParallax(scroll: Float) {
-        parallax = scroll
-        artLayer.translationY = scroll * 0.45f
-        card.translationY = scroll * 0.12f
-    }
-
-    fun startRotation() {
-        removeCallbacks(rotate)
-        if (items.size > 1) postDelayed(rotate, 9000L)
-    }
-
-    fun stopRotation() {
-        removeCallbacks(rotate)
-    }
-
-    private fun restartRotation() {
-        startRotation()
-    }
-
-    override fun onDetachedFromWindow() {
-        removeCallbacks(rotate)
-        column.animate().cancel()
-        super.onDetachedFromWindow()
-    }
-}
-
-// =====================================================================================
-//  SECTION 10 - Transient overlays
-// =====================================================================================
 
 class NoticeView(context: Context) : View(context) {
     private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
@@ -2279,293 +1225,870 @@ class NoticeView(context: Context) : View(context) {
     }
 }
 
-class LoadingView(context: Context) : View(context) {
-    private var phase = 0f
-    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
-    private val tick = object : Runnable {
-        override fun run() {
-            phase = (phase + 0.035f) % 1f
+
+// =====================================================================================
+//  SECTION 2 - Wallpaper
+// =====================================================================================
+
+object WallpaperArt {
+    /** Built in sky scene: gradient sky, layered clouds, crescent moon and bougainvillea. */
+    fun render(w: Int, h: Int): Bitmap {
+        val bmp = Bitmap.createBitmap(w, h, Bitmap.Config.ARGB_8888)
+        val c = Canvas(bmp)
+        val wf = w.toFloat()
+        val hf = h.toFloat()
+        val rnd = java.util.Random(42L)
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+
+        p.shader = LinearGradient(
+            0f, 0f, 0f, hf,
+            intArrayOf(0xFF2A74AC.toInt(), 0xFF3B8BC2.toInt(), 0xFF6FAAD3.toInt(), 0xFFB3CFE4.toInt()),
+            floatArrayOf(0f, 0.45f, 0.8f, 1f), Shader.TileMode.CLAMP
+        )
+        c.drawRect(0f, 0f, wf, hf, p)
+
+        // moon
+        val mx = wf * 0.70f
+        val my = hf * 0.31f
+        val mr = hf * 0.055f
+        p.shader = RadialGradient(
+            mx, my, mr * 3.2f,
+            intArrayOf(Color.argb(70, 255, 255, 255), Color.argb(0, 255, 255, 255)),
+            null, Shader.TileMode.CLAMP
+        )
+        c.drawCircle(mx, my, mr * 3.2f, p)
+        p.shader = null
+        val moon = Path()
+        val disc = Path()
+        val bite = Path()
+        disc.addCircle(mx, my, mr, Path.Direction.CW)
+        bite.addCircle(mx - mr * 0.38f, my - mr * 0.18f, mr * 0.92f, Path.Direction.CW)
+        moon.op(disc, bite, Path.Op.DIFFERENCE)
+        p.color = Color.argb(235, 246, 240, 235)
+        c.drawPath(moon, p)
+
+        // clouds
+        cloudBank(c, wf * 0.80f, hf * 0.74f, wf * 0.56f, rnd, 46)
+        cloudBank(c, wf * 0.44f, hf * 0.90f, wf * 0.40f, rnd, 30)
+        cloudBank(c, wf * 0.26f, hf * 0.74f, wf * 0.16f, rnd, 12)
+        cloudBank(c, wf * 0.95f, hf * 0.40f, wf * 0.22f, rnd, 16)
+
+        // flowers and leaves
+        p.shader = null
+        for (i in 0 until 90) {
+            val side = rnd.nextFloat()
+            val x = if (i % 4 == 0) wf * rnd.nextFloat() else wf * 0.2f * side * side
+            val y = if (i % 4 == 0) hf * (0.86f + 0.14f * rnd.nextFloat()) else hf * (0.04f + 0.96f * rnd.nextFloat())
+            c.save()
+            c.translate(x, y)
+            c.rotate(rnd.nextFloat() * 360f)
+            p.color = if (rnd.nextBoolean()) Color.rgb(46, 96, 58) else Color.rgb(70, 124, 72)
+            c.drawOval(-hf * 0.03f, -hf * 0.011f, hf * 0.03f, hf * 0.011f, p)
+            c.restore()
+        }
+        val petals = intArrayOf(0xFFC8143C.toInt(), 0xFFE0284F.toInt(), 0xFF9E0F32.toInt(), 0xFFF05A7A.toInt())
+        for (i in 0 until 240) {
+            val side = rnd.nextFloat()
+            val bottom = i % 3 == 0
+            val x = if (bottom) wf * rnd.nextFloat() else wf * 0.19f * side * side
+            val y = if (bottom) hf * (0.88f + 0.12f * rnd.nextFloat()) else hf * (0.02f + 0.98f * rnd.nextFloat())
+            val r = hf * (0.006f + 0.008f * rnd.nextFloat())
+            p.color = petals[rnd.nextInt(petals.size)]
+            for (k in 0 until 6) {
+                val a = k * 1.0472f + rnd.nextFloat() * 0.4f
+                c.drawCircle(x + cos(a) * r, y + sin(a) * r, r * 0.9f, p)
+            }
+            p.color = Color.rgb(250, 214, 110)
+            c.drawCircle(x, y, r * 0.35f, p)
+        }
+        return bmp
+    }
+
+    private fun cloudBank(c: Canvas, cx: Float, cy: Float, size: Float, rnd: java.util.Random, puffs: Int) {
+        val p = Paint(Paint.ANTI_ALIAS_FLAG)
+        for (i in 0 until puffs) {
+            val x = cx + (rnd.nextFloat() - 0.5f) * size * 1.5f
+            val lift = (1f - abs(x - cx) / (size * 0.75f)).coerceIn(0f, 1f)
+            val y = cy + (rnd.nextFloat() - 0.5f) * size * 0.34f - lift * size * 0.16f
+            val r = size * (0.09f + rnd.nextFloat() * 0.13f)
+            val warm = y > cy
+            val core = if (warm) Color.argb(235, 250, 226, 220) else Color.argb(240, 255, 255, 255)
+            p.shader = RadialGradient(
+                x, y, r,
+                intArrayOf(core, Color.argb(205, 250, 240, 238), Color.argb(0, 255, 255, 255)),
+                floatArrayOf(0f, 0.62f, 1f), Shader.TileMode.CLAMP
+            )
+            c.drawCircle(x, y, r, p)
+        }
+    }
+}
+
+class WallpaperView(context: Context) : View(context) {
+    private var bitmap: Bitmap? = null
+    private var reveal = 0f
+    private var pan = 0f
+    private var panAnimator: ValueAnimator? = null
+    private var revealAnimator: ValueAnimator? = null
+    private val paint = Paint(Paint.FILTER_BITMAP_FLAG)
+    private val topShade = Paint()
+    private val bottomShade = Paint()
+    private val dst = RectF()
+
+    fun setBitmap(b: Bitmap) {
+        bitmap = b
+        revealAnimator?.cancel()
+        val a = ValueAnimator.ofFloat(0f, 1f)
+        a.duration = 800L
+        a.addUpdateListener {
+            reveal = it.animatedValue as Float
             invalidate()
-            postDelayed(this, 50L)
+        }
+        revealAnimator = a
+        a.start()
+    }
+
+    /** Subtle parallax. -1 shifts the picture right, +1 shifts it left. */
+    fun panTo(target: Float) {
+        panAnimator?.cancel()
+        val a = ValueAnimator.ofFloat(pan, target.coerceIn(-1f, 1f))
+        a.duration = 650L
+        a.interpolator = DecelerateInterpolator(2f)
+        a.addUpdateListener {
+            pan = it.animatedValue as Float
+            invalidate()
+        }
+        panAnimator = a
+        a.start()
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        if (w <= 0 || h <= 0) return
+        topShade.shader = LinearGradient(0f, 0f, 0f, h * 0.30f, Color.argb(96, 0, 0, 0), Color.argb(0, 0, 0, 0), Shader.TileMode.CLAMP)
+        bottomShade.shader = LinearGradient(0f, h * 0.62f, 0f, h.toFloat(), Color.argb(0, 0, 0, 0), Color.argb(120, 0, 0, 0), Shader.TileMode.CLAMP)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val w = width.toFloat()
+        val h = height.toFloat()
+        canvas.drawColor(0xFF2A74AC.toInt())
+        val bmp = bitmap
+        if (bmp != null) {
+            val extra = w * 0.03f
+            val shift = pan * extra
+            dst.set(-extra - shift, -extra * 0.5f, w + extra - shift, h + extra * 0.5f)
+            paint.alpha = (reveal * 255f).toInt()
+            BitmapUtil.drawCropped(canvas, bmp, dst, paint)
+        }
+        canvas.drawRect(0f, 0f, w, h * 0.30f, topShade)
+        canvas.drawRect(0f, h * 0.62f, w, h, bottomShade)
+    }
+
+    override fun onDetachedFromWindow() {
+        panAnimator?.cancel()
+        revealAnimator?.cancel()
+        super.onDetachedFromWindow()
+    }
+}
+
+// =====================================================================================
+//  SECTION 3 - Clock
+// =====================================================================================
+
+class HomeClockView(context: Context) : View(context) {
+    private val timePaint = Ui.textPaint(Ui.s(60f), Color.WHITE, Fonts.light, 0.01f)
+    private val datePaint = Ui.textPaint(Ui.s(30f), Ui.alpha(Color.WHITE, 0.85f), Fonts.regular, 0.01f)
+    private var time = ""
+    private var date = ""
+    private val ticker = object : Runnable {
+        override fun run() {
+            refresh()
+            postDelayed(this, 15_000L)
         }
     }
 
-    init {
-        dotPaint.color = Color.WHITE
-        isFocusable = false
+    fun refresh() {
+        val now = Date()
+        val locale = Locale.getDefault()
+        val pattern = if (DateFormat.is24HourFormat(context)) "HH:mm" else "h:mm a"
+        val newTime = SimpleDateFormat(pattern, locale).format(now).uppercase(locale)
+        val newDate = SimpleDateFormat("EEE, MMM d", locale).format(now)
+        if (newTime != time || newDate != date) {
+            time = newTime
+            date = newDate
+            invalidate()
+        }
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(Ui.px(720), Ui.px(96))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val base = Ui.s(68f)
+        canvas.drawText(time, 0f, base, timePaint)
+        canvas.drawText(date, timePaint.measureText(time) + Ui.s(26f), base, datePaint)
     }
 
     override fun onAttachedToWindow() {
         super.onAttachedToWindow()
+        post(ticker)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(ticker)
+        super.onDetachedFromWindow()
+    }
+}
+
+// =====================================================================================
+//  SECTION 4 - Now playing (MediaSession) integration
+// =====================================================================================
+
+/** Declared in the manifest so the system can grant notification access, which unlocks media sessions. */
+class MediaListenerService : NotificationListenerService()
+
+class NowPlaying(
+    val controller: MediaController,
+    val packageName: String,
+    val title: String,
+    val artist: String,
+    val art: Bitmap?,
+    val playing: Boolean,
+    val position: Long,
+    val duration: Long,
+    val timestamp: Long,
+    val speed: Float
+)
+
+class NowPlayingTracker(
+    context: Context,
+    private val handler: Handler,
+    private val onChange: (NowPlaying?) -> Unit,
+    private val onDenied: () -> Unit
+) {
+    private val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
+    private val component = ComponentName(context, MediaListenerService::class.java)
+    private var controller: MediaController? = null
+    private var started = false
+    private val callback = object : MediaController.Callback() {
+        override fun onMetadataChanged(metadata: MediaMetadata?) {
+            publish()
+        }
+
+        override fun onPlaybackStateChanged(state: PlaybackState?) {
+            publish()
+        }
+
+        override fun onSessionDestroyed() {
+            refresh()
+        }
+    }
+    private val sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { list -> select(list) }
+
+    fun start() {
+        if (started) return
+        try {
+            manager.addOnActiveSessionsChangedListener(sessionListener, component, handler)
+            started = true
+            refresh()
+        } catch (e: SecurityException) {
+            onDenied()
+            onChange(null)
+        }
+    }
+
+    fun stop() {
+        if (started) {
+            try {
+                manager.removeOnActiveSessionsChangedListener(sessionListener)
+            } catch (e: RuntimeException) {
+                // listener already gone
+            }
+            started = false
+        }
+        controller?.unregisterCallback(callback)
+        controller = null
+    }
+
+    private fun refresh() {
+        try {
+            select(manager.getActiveSessions(component))
+        } catch (e: SecurityException) {
+            onChange(null)
+        }
+    }
+
+    private fun select(list: List<MediaController>?) {
+        val candidates = list.orEmpty()
+        val chosen = candidates.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
+            ?: candidates.firstOrNull { it.metadata != null }
+        if (chosen?.sessionToken != controller?.sessionToken) {
+            controller?.unregisterCallback(callback)
+            controller = chosen
+            chosen?.registerCallback(callback, handler)
+        }
+        publish()
+    }
+
+    private fun publish() {
+        val c = controller
+        if (c == null) {
+            onChange(null)
+            return
+        }
+        val md = c.metadata
+        val title = md?.getString(MediaMetadata.METADATA_KEY_TITLE)
+        if (md == null || title.isNullOrBlank()) {
+            onChange(null)
+            return
+        }
+        val artist = md.getString(MediaMetadata.METADATA_KEY_ARTIST)
+            ?: md.getString(MediaMetadata.METADATA_KEY_ALBUM_ARTIST) ?: ""
+        val art = md.getBitmap(MediaMetadata.METADATA_KEY_ALBUM_ART)
+            ?: md.getBitmap(MediaMetadata.METADATA_KEY_ART)
+            ?: md.getBitmap(MediaMetadata.METADATA_KEY_DISPLAY_ICON)
+        val state = c.playbackState
+        onChange(
+            NowPlaying(
+                controller = c,
+                packageName = c.packageName ?: "",
+                title = title,
+                artist = artist,
+                art = art,
+                playing = state?.state == PlaybackState.STATE_PLAYING,
+                position = state?.position ?: 0L,
+                duration = md.getLong(MediaMetadata.METADATA_KEY_DURATION),
+                timestamp = state?.lastPositionUpdateTime ?: SystemClock.elapsedRealtime(),
+                speed = state?.playbackSpeed ?: 1f
+            )
+        )
+    }
+}
+
+object Equalizer {
+    private val paint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    fun draw(
+        c: Canvas, left: Float, bottom: Float, barW: Float, gap: Float,
+        maxH: Float, bars: Int, color: Int, animated: Boolean
+    ) {
+        paint.color = color
+        val t = SystemClock.uptimeMillis() / 1000f
+        for (i in 0 until bars) {
+            val f = if (animated) 0.35f + 0.65f * (0.5f + 0.5f * sin(t * (5f + i * 1.7f) + i * 1.3f)) else 0.3f
+            val bh = maxH * f
+            val x = left + i * (barW + gap)
+            c.drawRoundRect(x, bottom - bh, x + barW, bottom, barW / 2f, barW / 2f, paint)
+        }
+    }
+}
+
+// =====================================================================================
+//  SECTION 5 - Round glass buttons and the now playing pill
+// =====================================================================================
+
+class RoundButton(
+    context: Context,
+    private var glyph: Glyph,
+    private val diameter: Float,
+    private val tone: GlassSurface.Tone,
+    private val glyphColor: Int
+) : FocusGlassView(context, 1.16f, 0f) {
+    private val bleed = Ui.s(12f)
+    private val surface = GlassSurface(tone)
+
+    fun setGlyph(g: Glyph) {
+        glyph = g
+        invalidate()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        val size = (diameter + bleed * 2).roundToInt()
+        setMeasuredDimension(size, size)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        surface.layout(bleed, bleed, w - bleed, h - bleed, diameter / 2f)
+        pivotX = w / 2f
+        pivotY = h / 2f
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val f = focusFraction
+        surface.drawBase(canvas, f)
+        surface.drawGloss(canvas, f)
+        val color = if (tone == GlassSurface.Tone.BRIGHT) glyphColor else Ui.lerpColor(glyphColor, Color.WHITE, f)
+        GlyphPainter.draw(canvas, glyph, width / 2f, height / 2f, diameter * 0.42f, color)
+    }
+}
+
+class NowPlayingPill(context: Context) : FrameLayout(context) {
+    var onHidden: (() -> Unit)? = null
+    private val bleed = Ui.s(24f)
+    private val pillW = Ui.s(760f)
+    private val pillH = Ui.s(160f)
+    val viewWidth: Int = (pillW + bleed * 2).roundToInt()
+    val viewHeight: Int = (pillH + bleed * 2).roundToInt()
+    private val surface = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val fillPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val artPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val progressPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val titlePaint = Ui.textPaint(Ui.s(26f), Color.WHITE, Fonts.medium)
+    private val artistPaint = Ui.textPaint(Ui.s(21f), Ui.alpha(Color.WHITE, 0.78f), Fonts.regular)
+    private val timePaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.78f), Fonts.regular)
+    private val artRect = RectF()
+    private val artClip = Path()
+    private val artPlaceholder = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var state: NowPlaying? = null
+    private var titleText = ""
+    private var artistText = ""
+    private val previous = RoundButton(context, Glyph.PREV, Ui.s(50f), GlassSurface.Tone.SMOKED, Color.WHITE)
+    private val toggle = RoundButton(context, Glyph.PAUSE, Ui.s(56f), GlassSurface.Tone.BRIGHT, Color.rgb(8, 8, 10))
+    private val next = RoundButton(context, Glyph.NEXT, Ui.s(50f), GlassSurface.Tone.SMOKED, Color.WHITE)
+    private val tick = object : Runnable {
+        override fun run() {
+            invalidate()
+            if (state?.playing == true) postDelayed(this, 160L)
+        }
+    }
+
+    init {
+        setWillNotDraw(false)
+        clipChildren = false
+        clipToPadding = false
+        fillPaint.color = Color.argb(214, 3, 3, 5)
+        trackPaint.color = Color.argb(60, 255, 255, 255)
+        progressPaint.color = SPOTIFY_GREEN
+        artPlaceholder.color = Color.rgb(40, 44, 52)
+        timePaint.textAlign = Paint.Align.LEFT
+        visibility = View.GONE
+        place(previous, -Ui.s(84f))
+        place(toggle, 0f)
+        place(next, Ui.s(84f))
+        previous.focusKey = "pill:prev"
+        toggle.focusKey = "pill:toggle"
+        next.focusKey = "pill:next"
+        previous.setOnClickListener { state?.controller?.transportControls?.skipToPrevious() }
+        next.setOnClickListener { state?.controller?.transportControls?.skipToNext() }
+        toggle.setOnClickListener {
+            val s = state
+            if (s != null) {
+                if (s.playing) s.controller.transportControls.pause() else s.controller.transportControls.play()
+            }
+        }
+    }
+
+    private fun place(button: RoundButton, dx: Float) {
+        button.measure(MeasureSpec.UNSPECIFIED, MeasureSpec.UNSPECIFIED)
+        val size = button.measuredWidth
+        val lp = FrameLayout.LayoutParams(size, size)
+        lp.gravity = Gravity.TOP or Gravity.START
+        lp.leftMargin = (bleed + pillW / 2f + dx - size / 2f).roundToInt()
+        lp.topMargin = (bleed + Ui.s(126f) - size / 2f).roundToInt()
+        addView(button, lp)
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        super.onMeasure(
+            MeasureSpec.makeMeasureSpec(viewWidth, MeasureSpec.EXACTLY),
+            MeasureSpec.makeMeasureSpec(viewHeight, MeasureSpec.EXACTLY)
+        )
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        surface.layout(bleed, bleed, bleed + pillW, bleed + pillH, Ui.s(44f))
+        artRect.set(bleed + Ui.s(22f), bleed + Ui.s(20f), bleed + Ui.s(80f), bleed + Ui.s(78f))
+        artClip.reset()
+        artClip.addRoundRect(artRect, Ui.s(10f), Ui.s(10f), Path.Direction.CW)
+    }
+
+    fun update(np: NowPlaying?) {
+        if (np == null) {
+            hide()
+            return
+        }
+        state = np
+        val textW = pillW - Ui.s(98f) - Ui.s(90f)
+        titleText = TextUtils.ellipsize(np.title, titlePaint, textW, TextUtils.TruncateAt.END).toString()
+        artistText = TextUtils.ellipsize(np.artist, artistPaint, textW, TextUtils.TruncateAt.END).toString()
+        toggle.setGlyph(if (np.playing) Glyph.PAUSE else Glyph.PLAY)
+        removeCallbacks(tick)
         post(tick)
+        show()
+    }
+
+    private fun show() {
+        if (visibility == View.VISIBLE && alpha >= 0.99f) return
+        animate().cancel()
+        if (visibility != View.VISIBLE) {
+            visibility = View.VISIBLE
+            alpha = 0f
+            translationY = -Ui.s(24f)
+        }
+        animate().alpha(1f).translationY(0f).setDuration(320L).setInterpolator(DecelerateInterpolator(1.6f)).start()
+    }
+
+    private fun hide() {
+        state = null
+        removeCallbacks(tick)
+        if (visibility != View.VISIBLE) return
+        val hadFocus = hasFocus()
+        animate().cancel()
+        animate().alpha(0f).translationY(-Ui.s(24f)).setDuration(240L).withEndAction {
+            if (state == null) visibility = View.GONE
+        }.start()
+        if (hadFocus) onHidden?.invoke()
+    }
+
+    private fun position(np: NowPlaying): Long {
+        var pos = np.position
+        if (np.playing) pos += ((SystemClock.elapsedRealtime() - np.timestamp) * np.speed).toLong()
+        if (np.duration > 0) pos = pos.coerceIn(0L, np.duration)
+        return max(0L, pos)
+    }
+
+    private fun format(ms: Long): String {
+        val total = (ms / 1000L).toInt()
+        val sec = total % 60
+        return (total / 60).toString() + ":" + (if (sec < 10) "0" else "") + sec
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        surface.drawBase(canvas, 0f)
+        canvas.drawRoundRect(surface.rect, Ui.s(44f), Ui.s(44f), fillPaint)
+        surface.drawGloss(canvas, 0f)
+        val np = state ?: return
+        val l = bleed
+        val t = bleed
+
+        canvas.save()
+        canvas.clipPath(artClip)
+        val art = np.art
+        if (art != null) BitmapUtil.drawCropped(canvas, art, artRect, artPaint) else canvas.drawRect(artRect, artPlaceholder)
+        canvas.restore()
+
+        val textX = l + Ui.s(98f)
+        canvas.drawText(titleText, textX, Ui.baseline(titlePaint, t + Ui.s(36f)), titlePaint)
+        canvas.drawText(artistText, textX, Ui.baseline(artistPaint, t + Ui.s(66f)), artistPaint)
+        Equalizer.draw(
+            canvas, l + pillW - Ui.s(22f) - Ui.s(30f), t + Ui.s(48f),
+            Ui.s(4f), Ui.s(3.5f), Ui.s(26f), 4, SPOTIFY_GREEN, np.playing
+        )
+
+        val pos = position(np)
+        val barL = l + Ui.s(22f)
+        val barR = l + pillW - Ui.s(22f)
+        val barY = t + Ui.s(94f)
+        canvas.drawRoundRect(barL, barY - Ui.s(2f), barR, barY + Ui.s(2f), Ui.s(2f), Ui.s(2f), trackPaint)
+        if (np.duration > 0) {
+            val frac = (pos.toFloat() / np.duration.toFloat()).coerceIn(0f, 1f)
+            canvas.drawRoundRect(barL, barY - Ui.s(2f), barL + (barR - barL) * frac, barY + Ui.s(2f), Ui.s(2f), Ui.s(2f), progressPaint)
+        }
+        val timeY = Ui.baseline(timePaint, t + Ui.s(126f))
+        timePaint.textAlign = Paint.Align.LEFT
+        canvas.drawText(format(pos), barL, timeY, timePaint)
+        timePaint.textAlign = Paint.Align.RIGHT
+        canvas.drawText(if (np.duration > 0) format(np.duration) else "--:--", barR, timeY, timePaint)
     }
 
     override fun onDetachedFromWindow() {
         removeCallbacks(tick)
+        animate().cancel()
         super.onDetachedFromWindow()
     }
-
-    override fun onDraw(canvas: Canvas) {
-        val cx = width / 2f
-        val cy = height / 2f
-        BrandMark.draw(canvas, cx, cy - Ui.s(40f), Ui.s(54f))
-        for (i in 0..2) {
-            val t = (phase - i * 0.16f + 1f) % 1f
-            val a = 0.25f + 0.75f * (0.5f + 0.5f * sin(t * TAU))
-            dotPaint.alpha = (a * 255f).toInt()
-            canvas.drawCircle(cx + (i - 1) * Ui.s(34f), cy + Ui.s(70f), Ui.s(6f), dotPaint)
-        }
-    }
 }
 
 // =====================================================================================
-//  SECTION 11 - Pages
+//  SECTION 6 - Dock
 // =====================================================================================
 
-class PageContent(val id: String, val stage: VerticalStage, val hero: HeroView?) {
-    fun findKey(key: String): View? = stage.findFocusGlass { it.focusKey == key }
+class DockStore(context: Context) {
+    private val prefs = context.getSharedPreferences("sambhav_launcher", Context.MODE_PRIVATE)
 
-    fun defaultFocus(): View? = hero?.primaryButton ?: stage.findFocusGlass { true }
-}
+    private fun read(): MutableList<String> =
+        (prefs.getString(KEY, "") ?: "").split("|").filter { it.isNotBlank() }.toMutableList()
 
-class PageFactory(private val context: Context, private val host: LauncherHost) {
-
-    private fun newStage(anchor: Float): VerticalStage {
-        val stage = VerticalStage(context)
-        stage.anchorTop = Ui.s(anchor)
-        stage.column.setPadding(0, 0, 0, Ui.px(120))
-        return stage
+    private fun write(list: List<String>) {
+        prefs.edit().putString(KEY, list.joinToString("|")).apply()
     }
 
-    private fun section(header: View, row: CarouselRow): LinearLayout {
-        val box = LinearLayout(context)
-        box.orientation = LinearLayout.VERTICAL
-        box.clipChildren = false
-        box.clipToPadding = false
-        box.addView(header, LinearLayout.LayoutParams(MATCH, Ui.px(SECTION_HEADER_HEIGHT)))
-        box.addView(row, LinearLayout.LayoutParams(MATCH, row.rowHeight))
-        return box
-    }
-
-    private fun header(title: String, subtitle: String? = null): SectionHeaderView =
-        SectionHeaderView(context, title, subtitle)
-
-    private fun newRow(height: Int): CarouselRow =
-        CarouselRow(context, height, Ui.s(96f) - Ui.s(TILE_BLEED))
-
-    private fun tilesRow(entries: List<AppEntry>, style: TileStyle, prefix: String): CarouselRow {
-        val row = newRow(AppTile.heightFor(style))
-        for (entry in entries) {
-            val tile = AppTile(context, entry, style)
-            val key = prefix + ":" + entry.packageName
-            tile.focusKey = key
-            tile.setOnClickListener { host.launchApp(entry) }
-            tile.onFocusGained = { host.onContentFocused(key, entry.accent, Palette.secondary(entry.accent)) }
-            row.track.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
-        }
-        return row
-    }
-
-    private fun settingsRow(actions: List<SettingsAction>, info: View? = null): CarouselRow {
-        val row = newRow(SettingsTile.heightFor())
-        for (action in actions) {
-            val tile = SettingsTile(context, action)
-            val key = "set:" + action.id
-            tile.focusKey = key
-            tile.setOnClickListener { host.openSetting(action) }
-            tile.onFocusGained = { host.onContentFocused(key, Palette.silver, Palette.secondary(Palette.silver)) }
-            row.track.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
-        }
-        if (info != null) row.track.addView(info, LinearLayout.LayoutParams(WRAP, SettingsTile.heightFor()))
-        return row
-    }
-
-    private fun addEmpty(stage: VerticalStage, title: String, message: String) {
-        val box = LinearLayout(context)
-        box.orientation = LinearLayout.VERTICAL
-        box.clipChildren = false
-        val panelParams = LinearLayout.LayoutParams(WRAP, WRAP)
-        panelParams.leftMargin = Ui.px(96) - Ui.px(TILE_BLEED.toInt())
-        box.addView(EmptyPanelView(context, title, message), panelParams)
-        val button = GlassButton(context, "Browse Applications", Glyph.GRID, false)
-        button.focusKey = "empty:browse"
-        button.setOnClickListener { host.selectTab(3, true) }
-        button.onFocusGained = { host.onContentFocused("empty:browse", Palette.silver, Palette.secondary(Palette.silver)) }
-        val buttonParams = LinearLayout.LayoutParams(WRAP, WRAP)
-        buttonParams.leftMargin = Ui.px(96) - Ui.px(22)
-        buttonParams.topMargin = Ui.px(20)
-        box.addView(button, buttonParams)
-        stage.column.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
-    }
-
-    private fun titleView(title: String, subtitle: String): PageTitleView = PageTitleView(context, title, subtitle)
-
-    fun buildHome(apps: List<AppEntry>, recents: List<String>, heroes: List<HeroItem>): PageContent {
-        val stage = newStage(430f)
-        val hero = HeroView(context, heroes, host)
-        stage.column.addView(hero, LinearLayout.LayoutParams(MATCH, Ui.px(HERO_HEIGHT)))
-        stage.onScroll = { hero.applyParallax(it) }
-        if (apps.isEmpty()) {
-            addEmpty(stage, "No applications found", "Install apps from the Play Store to see them here.")
-            return PageContent("home", stage, hero)
-        }
+    fun resolve(apps: List<AppEntry>): List<AppEntry> {
         val byPackage = apps.associateBy { it.packageName }
-        val recentApps = recents.mapNotNull { byPackage[it] }.take(10)
-        if (recentApps.isNotEmpty()) {
-            stage.column.addView(
-                section(header("Recently Opened", "Pick up where you left off"), tilesRow(recentApps, TileStyle.LANDSCAPE, "recent")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-        } else {
-            val suggested = apps.sortedBy { it.category.ordinal }.take(8)
-            stage.column.addView(
-                section(header("Suggested for You", "Based on what is installed"), tilesRow(suggested, TileStyle.LANDSCAPE, "recent")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
+        var pins = read().filter { byPackage.containsKey(it) }.toMutableList()
+        if (!prefs.contains(KEY) && apps.isNotEmpty()) {
+            pins = defaults(apps).toMutableList()
+            write(pins)
         }
-        stage.column.addView(
-            section(header("Applications", apps.size.toString() + " installed"), tilesRow(apps, TileStyle.SQUARE, "apps")),
-            LinearLayout.LayoutParams(MATCH, WRAP)
-        )
-        return PageContent("home", stage, hero)
+        return pins.mapNotNull { byPackage[it] }.take(MAX)
     }
 
-    fun buildMovies(apps: List<AppEntry>, recents: List<String>): PageContent {
-        val stage = newStage(250f)
-        stage.column.addView(
-            titleView("Movies", "Streaming services and video players on this television"),
-            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
-        )
-        val video = apps.filter { it.category == AppCategory.VIDEO }
-        if (video.isEmpty()) {
-            addEmpty(stage, "No streaming applications found", "Install a streaming or video player app to see it here.")
-        } else {
-            stage.column.addView(
-                section(header("Streaming Services", video.size.toString() + " available"), tilesRow(video, TileStyle.POSTER, "movie")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-            val recentVideo = recents.mapNotNull { pkg -> video.firstOrNull { it.packageName == pkg } }
-            if (recentVideo.isNotEmpty()) {
-                stage.column.addView(
-                    section(header("Continue Watching"), tilesRow(recentVideo, TileStyle.LANDSCAPE, "movie-recent")),
-                    LinearLayout.LayoutParams(MATCH, WRAP)
-                )
-            }
+    fun isPinned(pkg: String): Boolean = read().contains(pkg)
+
+    /** Returns 1 when added, 0 when removed and -1 when the dock is full. */
+    fun toggle(pkg: String): Int {
+        val pins = read()
+        if (pins.remove(pkg)) {
+            write(pins)
+            return 0
         }
-        return PageContent("movies", stage, null)
+        if (pins.size >= MAX) return -1
+        pins.add(pkg)
+        write(pins)
+        return 1
     }
 
-    fun buildShows(apps: List<AppEntry>): PageContent {
-        val stage = newStage(250f)
-        stage.column.addView(
-            titleView("Shows", "Live channels, series and audio"),
-            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
-        )
-        val video = apps.filter { it.category == AppCategory.VIDEO }
-        val music = apps.filter { it.category == AppCategory.MUSIC }
-        val live = video.filter { app ->
-            val key = (app.packageName + " " + app.label).lowercase(Locale.getDefault())
-            LIVE_HINTS.any { key.contains(it) }
+    private fun defaults(apps: List<AppEntry>): List<String> {
+        val out = ArrayList<String>()
+        for (name in PRIORITY) {
+            val match = apps.firstOrNull { it.packageName.startsWith(name) }
+            if (match != null && !out.contains(match.packageName)) out.add(match.packageName)
         }
-        if (video.isEmpty() && music.isEmpty()) {
-            addEmpty(stage, "No show applications found", "Install a TV or streaming app to see it here.")
+        for (app in apps.sortedBy { it.category.ordinal }) {
+            if (out.size >= MAX) break
+            if (!out.contains(app.packageName)) out.add(app.packageName)
         }
-        if (live.isNotEmpty()) {
-            stage.column.addView(
-                section(header("Live and Channels", live.size.toString() + " available"), tilesRow(live, TileStyle.LANDSCAPE, "show-live")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-        }
-        if (video.isNotEmpty()) {
-            stage.column.addView(
-                section(header("On Demand", video.size.toString() + " available"), tilesRow(video, TileStyle.LANDSCAPE, "show")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-        }
-        if (music.isNotEmpty()) {
-            stage.column.addView(
-                section(header("Music and Audio", music.size.toString() + " available"), tilesRow(music, TileStyle.LANDSCAPE, "show-music")),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-        }
-        return PageContent("shows", stage, null)
-    }
-
-    fun buildApps(apps: List<AppEntry>): PageContent {
-        val stage = newStage(250f)
-        stage.column.addView(
-            titleView("Applications", apps.size.toString() + " installed on this television"),
-            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
-        )
-        if (apps.isEmpty()) {
-            addEmpty(stage, "No applications found", "Install apps from the Play Store to see them here.")
-        }
-        for (category in AppCategory.values()) {
-            val list = apps.filter { it.category == category }
-            if (list.isEmpty()) continue
-            stage.column.addView(
-                section(header(category.displayName, list.size.toString()), tilesRow(list, TileStyle.SQUARE, "cat-" + category.name.lowercase(Locale.US))),
-                LinearLayout.LayoutParams(MATCH, WRAP)
-            )
-        }
-        return PageContent("apps", stage, null)
-    }
-
-    fun buildSettings(appCount: Int): PageContent {
-        val stage = newStage(250f)
-        stage.column.addView(
-            titleView("Settings", "Configure your television and this launcher"),
-            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
-        )
-        stage.column.addView(
-            section(header("System", "Opens the Android TV settings"), settingsRow(SettingsCatalog.system)),
-            LinearLayout.LayoutParams(MATCH, WRAP)
-        )
-        val metrics = context.resources.displayMetrics
-        val cells = listOf(
-            Pair("DEVICE", (Build.MANUFACTURER + " " + Build.MODEL).trim()),
-            Pair("ANDROID", "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"),
-            Pair("DISPLAY", metrics.widthPixels.toString() + " x " + metrics.heightPixels),
-            Pair("APPLICATIONS", appCount.toString() + " installed"),
-            Pair("LAUNCHER", "Sambhav TV OS 1.0"),
-            Pair("LANGUAGE", Locale.getDefault().displayLanguage)
-        )
-        stage.column.addView(
-            section(header("Sambhav", "Launcher tools and device information"), settingsRow(SettingsCatalog.launcher, InfoPanelView(context, cells))),
-            LinearLayout.LayoutParams(MATCH, WRAP)
-        )
-        return PageContent("settings", stage, null)
+        return out.take(MAX)
     }
 
     companion object {
-        private val LIVE_HINTS = listOf("live", "tv", "jio", "airtel", "tata", "zee", "sony", "hotstar", "channel")
+        const val MAX = 7
+        private const val KEY = "dock"
+        private val PRIORITY = listOf(
+            "com.google.android.youtube.tv", "com.amazon.amazonvideo.livingroom", "in.startv.hotstar",
+            "com.netflix.ninja", "com.spotify.tv.android", "com.google.android.videos", "com.plexapp.android"
+        )
+    }
+}
+
+class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(context, 1.34f, Ui.s(16f)) {
+    private val bleed = Ui.s(24f)
+    private val roomY = Ui.s(60f)
+    private val cardW = Ui.s(192f)
+    private val cardH = Ui.s(120f)
+    val tileWidth: Int = (cardW + bleed * 2).roundToInt()
+    val tileHeight: Int = (cardH + roomY * 2).roundToInt()
+    val packageName: String? get() = entry?.packageName
+    private val frost = GlassSurface(GlassSurface.Tone.FROST)
+    private val dark = GlassSurface(GlassSurface.Tone.SMOKED)
+    private val cardRect = RectF()
+    private val tipRect = RectF()
+    private val mediaPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
+    private val veilPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tipFill = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val tipText = Ui.textPaint(Ui.s(22f), Color.WHITE, Fonts.medium)
+    private var label = entry?.label ?: "All Apps"
+    private val eqTick = object : Runnable {
+        override fun run() {
+            invalidate()
+            if (playing) postDelayed(this, 120L)
+        }
+    }
+    var playing: Boolean = false
+        set(value) {
+            if (field == value) return
+            field = value
+            removeCallbacks(eqTick)
+            if (value) post(eqTick)
+            invalidate()
+        }
+
+    init {
+        contentDescription = label
+        veilPaint.color = Color.WHITE
+        dotPaint.color = Color.WHITE
+        tipFill.color = Color.rgb(12, 16, 24)
+        dark.shadowEnabled = false
+        tipText.textAlign = Paint.Align.CENTER
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(tileWidth, tileHeight)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        cardRect.set(bleed, roomY, w - bleed, roomY + cardH)
+        val radius = Ui.s(26f)
+        frost.layout(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom, radius)
+        dark.layout(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom, radius)
+        pivotX = w / 2f
+        pivotY = cardRect.centerY()
+        label = TextUtils.ellipsize(entry?.label ?: "All Apps", tipText, Ui.s(190f), TextUtils.TruncateAt.END).toString()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val f = focusFraction
+        frost.drawBase(canvas, f, ((1f - f) * 255f).toInt())
+        if (f > 0.01f) dark.drawBase(canvas, 0f, (f * 255f).toInt())
+        canvas.save()
+        frost.clipTo(canvas)
+        if (entry == null) drawGridDots(canvas) else drawContent(canvas, f, entry)
+        canvas.restore()
+        frost.drawGloss(canvas, f)
+        if (playing) {
+            val total = 3 * Ui.s(4f) + 2 * Ui.s(3.5f)
+            Equalizer.draw(
+                canvas, cardRect.centerX() - total / 2f, cardRect.bottom - Ui.s(10f),
+                Ui.s(4f), Ui.s(3.5f), Ui.s(22f), 3, entry?.accent ?: SPOTIFY_GREEN, true
+            )
+        }
+        if (f > 0.02f) drawTooltip(canvas, f)
+    }
+
+    private fun drawContent(canvas: Canvas, f: Float, app: AppEntry) {
+        val banner = app.banner
+        if (banner != null) {
+            mediaPaint.alpha = (190f + 65f * f).toInt()
+            BitmapUtil.drawCropped(canvas, banner, cardRect, mediaPaint)
+        } else {
+            IconPlate.draw(
+                canvas, app.icon, app.initial, app.accent,
+                cardRect.centerX(), cardRect.centerY(), cardRect.height() * 0.64f
+            )
+        }
+        veilPaint.alpha = ((1f - f) * 36f).toInt()
+        canvas.drawRect(cardRect, veilPaint)
+    }
+
+    private fun drawGridDots(canvas: Canvas) {
+        val gap = Ui.s(26f)
+        dotPaint.alpha = 235
+        for (i in -1..1) for (j in -1..1) {
+            canvas.drawCircle(cardRect.centerX() + i * gap, cardRect.centerY() + j * gap, Ui.s(6f), dotPaint)
+        }
+    }
+
+    private fun drawTooltip(canvas: Canvas, f: Float) {
+        val tw = tipText.measureText(label) + Ui.s(36f)
+        val th = Ui.s(38f)
+        val cx = cardRect.centerX()
+        val bottom = cardRect.top - Ui.s(14f)
+        tipRect.set(cx - tw / 2f, bottom - th, cx + tw / 2f, bottom)
+        tipFill.alpha = (f * 238f).toInt()
+        canvas.drawRoundRect(tipRect, th / 2.6f, th / 2.6f, tipFill)
+        tipText.alpha = (f * 255f).toInt()
+        canvas.drawText(label, cx, Ui.baseline(tipText, tipRect.centerY()), tipText)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(eqTick)
+        super.onDetachedFromWindow()
     }
 }
 
 // =====================================================================================
-//  SECTION 12 - Activity
+//  SECTION 7 - All apps overlay
 // =====================================================================================
 
-class MainActivity : Activity(), LauncherHost {
+class OverlayTitleView(context: Context) : View(context) {
+    private val titlePaint = Ui.textPaint(Ui.s(58f), Color.WHITE, Fonts.light, -0.01f)
+    private val hintPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.55f), Fonts.regular, 0.01f)
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(230))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val x = Ui.s(96f)
+        canvas.drawText("All Apps", x, Ui.s(140f), titlePaint)
+        canvas.drawText("Hold OK on an app to add it to the dock or remove it", x, Ui.s(188f), hintPaint)
+    }
+}
+
+class AllAppsOverlay(
+    context: Context,
+    private val onLaunch: (AppEntry) -> Unit,
+    private val onPinToggle: (AppEntry) -> Unit
+) : FrameLayout(context) {
+    private val stage = VerticalStage(context)
+    private var firstTile: View? = null
+    var isOpen = false
+        private set
+
+    init {
+        visibility = View.GONE
+        setBackgroundColor(Ui.alpha(Color.BLACK, 0.80f))
+        stage.anchorTop = Ui.s(200f)
+        stage.column.setPadding(0, 0, 0, Ui.px(120))
+        addView(stage, FrameLayout.LayoutParams(MATCH, MATCH))
+    }
+
+    fun firstFocusable(): View? = firstTile
+
+    fun populate(apps: List<AppEntry>) {
+        stage.column.removeAllViews()
+        stage.resetScroll()
+        firstTile = null
+        stage.column.addView(OverlayTitleView(context), LinearLayout.LayoutParams(MATCH, Ui.px(230)))
+        val perRow = 7
+        var index = 0
+        while (index < apps.size) {
+            val row = LinearLayout(context)
+            row.orientation = LinearLayout.HORIZONTAL
+            row.clipChildren = false
+            row.setPadding(Ui.px(96) - Ui.px(TILE_BLEED.toInt()), 0, 0, 0)
+            for (entry in apps.subList(index, min(index + perRow, apps.size))) {
+                val tile = AppTile(context, entry, TileStyle.SQUARE)
+                tile.focusKey = "all:" + entry.packageName
+                tile.setOnClickListener { onLaunch(entry) }
+                tile.isLongClickable = true
+                tile.setOnLongClickListener {
+                    onPinToggle(entry)
+                    true
+                }
+                row.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
+                if (firstTile == null) firstTile = tile
+            }
+            stage.column.addView(row, LinearLayout.LayoutParams(MATCH, AppTile.heightFor(TileStyle.SQUARE)))
+            index += perRow
+        }
+    }
+
+    fun open() {
+        isOpen = true
+        animate().cancel()
+        visibility = View.VISIBLE
+        alpha = 0f
+        animate().alpha(1f).setDuration(240L).start()
+    }
+
+    fun close() {
+        isOpen = false
+        animate().cancel()
+        animate().alpha(0f).setDuration(200L).withEndAction {
+            if (!isOpen) visibility = View.GONE
+        }.start()
+    }
+}
+
+// =====================================================================================
+//  SECTION 8 - Activity
+// =====================================================================================
+
+class MainActivity : Activity() {
     private lateinit var root: FrameLayout
-    private lateinit var ambient: AmbientBackgroundView
-    private lateinit var pageHost: FrameLayout
-    private lateinit var clock: ClockView
+    private lateinit var wallpaper: WallpaperView
+    private lateinit var content: FrameLayout
+    private lateinit var clock: HomeClockView
+    private lateinit var pill: NowPlayingPill
+    private lateinit var dock: GlassPanelLayout
+    private lateinit var overlay: AllAppsOverlay
     private lateinit var notice: NoticeView
     private lateinit var repository: AppRepository
     private lateinit var recents: RecentsStore
-    private var loading: LoadingView? = null
-    private val tabs = ArrayList<NavTabView>()
-    private var pages: List<PageContent> = emptyList()
+    private lateinit var dockStore: DockStore
+    private lateinit var tracker: NowPlayingTracker
+    private val dockTiles = ArrayList<DockTile>()
     private var apps: List<AppEntry> = emptyList()
-    private var heroes: List<HeroItem> = emptyList()
-    private var currentPage = 0
-    private var lastFocusKey: String? = null
-    private var heroOwnsAmbient = true
-    private var recentsDirty = false
+    private var nowPlaying: NowPlaying? = null
+    private var lastDockKey: String? = null
     private var loadToken = 0
     private var receiversRegistered = false
-    private val pageFocusKeys = HashMap<Int, String>()
     private val handler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
     private val reloadRunnable = Runnable { reloadApps() }
@@ -2581,13 +2104,15 @@ class MainActivity : Activity(), LauncherHost {
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         Ui.init(this)
-        window.setBackgroundDrawable(ColorDrawable(Palette.black))
+        window.setBackgroundDrawable(ColorDrawable(0xFF2A74AC.toInt()))
         repository = AppRepository(applicationContext)
         recents = RecentsStore(applicationContext)
-        currentPage = (savedInstanceState?.getInt(STATE_PAGE, 0) ?: 0).coerceIn(0, TAB_NAMES.size - 1)
-        lastFocusKey = savedInstanceState?.getString(STATE_FOCUS)
+        dockStore = DockStore(applicationContext)
+        tracker = NowPlayingTracker(this, handler, { onNowPlaying(it) }, { onMediaAccessDenied() })
+        lastDockKey = savedInstanceState?.getString(STATE_FOCUS)
         buildShell()
         setContentView(root)
+        loadWallpaper()
         reloadApps()
     }
 
@@ -2602,27 +2127,16 @@ class MainActivity : Activity(), LauncherHost {
             registerReceiver(packageReceiver, filter)
             receiversRegistered = true
         }
+        tracker.start()
     }
 
     override fun onResume() {
         super.onResume()
         clock.refresh()
-        ambient.setRunning(true)
-        if (recentsDirty && pages.isNotEmpty()) {
-            recentsDirty = false
-            rebuildPages(lastFocusKey, false)
-        } else if (currentPage == 0) {
-            pages.getOrNull(0)?.hero?.startRotation()
-        }
-    }
-
-    override fun onPause() {
-        ambient.setRunning(false)
-        pages.getOrNull(0)?.hero?.stopRotation()
-        super.onPause()
     }
 
     override fun onStop() {
+        tracker.stop()
         if (receiversRegistered) {
             try {
                 unregisterReceiver(packageReceiver)
@@ -2642,16 +2156,15 @@ class MainActivity : Activity(), LauncherHost {
 
     override fun onSaveInstanceState(outState: Bundle) {
         super.onSaveInstanceState(outState)
-        outState.putInt(STATE_PAGE, currentPage)
-        outState.putString(STATE_FOCUS, lastFocusKey)
+        outState.putString(STATE_FOCUS, lastDockKey)
     }
 
     override fun onNewIntent(intent: Intent?) {
         super.onNewIntent(intent)
-        if (intent != null && intent.hasCategory(Intent.CATEGORY_HOME) && pages.isNotEmpty()) {
-            pageFocusKeys.remove(0)
-            showPage(0)
-            runAfterLayout { pages.getOrNull(0)?.defaultFocus()?.requestFocus() }
+        if (intent != null && intent.hasCategory(Intent.CATEGORY_HOME)) {
+            if (overlay.isOpen) closeAllApps(false)
+            lastDockKey = null
+            focusDock(null)
         }
     }
 
@@ -2659,68 +2172,108 @@ class MainActivity : Activity(), LauncherHost {
 
     private fun buildShell() {
         root = FrameLayout(this)
-        root.setBackgroundColor(Palette.black)
+        root.setBackgroundColor(0xFF2A74AC.toInt())
         root.clipChildren = false
 
-        ambient = AmbientBackgroundView(this)
-        root.addView(ambient, FrameLayout.LayoutParams(MATCH, MATCH))
+        wallpaper = WallpaperView(this)
+        root.addView(wallpaper, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        pageHost = FrameLayout(this)
-        pageHost.clipChildren = false
-        root.addView(pageHost, FrameLayout.LayoutParams(MATCH, MATCH))
+        content = FrameLayout(this)
+        content.clipChildren = false
+        content.clipToPadding = false
+        root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        val scrim = View(this)
-        scrim.background = GradientDrawable(
-            GradientDrawable.Orientation.TOP_BOTTOM,
-            intArrayOf(Ui.alpha(Palette.black, 0.92f), Ui.alpha(Palette.black, 0.55f), Ui.alpha(Palette.black, 0f))
-        )
-        root.addView(scrim, FrameLayout.LayoutParams(MATCH, Ui.px(210)))
-
-        val nav = FrameLayout(this)
-        nav.clipChildren = false
-        root.addView(nav, FrameLayout.LayoutParams(MATCH, Ui.px(140)))
-
-        val brandParams = FrameLayout.LayoutParams(WRAP, WRAP)
-        brandParams.gravity = Gravity.START or Gravity.CENTER_VERTICAL
-        brandParams.leftMargin = Ui.px(96) - Ui.px(6)
-        nav.addView(BrandView(this), brandParams)
-
-        val tabPanel = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(44f))
-        tabPanel.orientation = LinearLayout.HORIZONTAL
-        tabPanel.setPadding(Ui.px(8), 0, Ui.px(8), 0)
-        tabPanel.gravity = Gravity.CENTER_VERTICAL
-        for ((i, name) in TAB_NAMES.withIndex()) {
-            val tab = NavTabView(this, name)
-            tab.focusKey = "nav:" + i
-            tab.selectedTab = i == currentPage
-            tab.onFocusGained = {
-                showPage(i)
-                pages.getOrNull(i)?.stage?.scrollToTop()
-            }
-            tab.onEnterContent = { enterContent() }
-            tab.setOnClickListener { enterContent() }
-            tabs.add(tab)
-            tabPanel.addView(tab, LinearLayout.LayoutParams(WRAP, WRAP))
-        }
-        val tabParams = FrameLayout.LayoutParams(WRAP, Ui.px(76))
-        tabParams.gravity = Gravity.CENTER
-        nav.addView(tabPanel, tabParams)
-
-        clock = ClockView(this)
+        clock = HomeClockView(this)
         val clockParams = FrameLayout.LayoutParams(WRAP, WRAP)
-        clockParams.gravity = Gravity.END or Gravity.CENTER_VERTICAL
-        clockParams.rightMargin = Ui.px(96) - Ui.px(4)
-        nav.addView(clock, clockParams)
+        clockParams.gravity = Gravity.TOP or Gravity.START
+        clockParams.leftMargin = Ui.px(81)
+        clockParams.topMargin = Ui.px(54)
+        content.addView(clock, clockParams)
+
+        pill = NowPlayingPill(this)
+        pill.onHidden = { focusDock(lastDockKey) }
+        val pillParams = FrameLayout.LayoutParams(pill.viewWidth, pill.viewHeight)
+        pillParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        pillParams.topMargin = Ui.px(62) - Ui.px(24)
+        content.addView(pill, pillParams)
+
+        val buttons = LinearLayout(this)
+        buttons.orientation = LinearLayout.HORIZONTAL
+        buttons.clipChildren = false
+        buttons.clipToPadding = false
+        val diameter = Ui.s(69f)
+        val inputs = RoundButton(this, Glyph.INPUT, diameter, GlassSurface.Tone.FROST, Color.WHITE)
+        val network = RoundButton(this, Glyph.WIFI, diameter, GlassSurface.Tone.FROST, Color.WHITE)
+        val gear = RoundButton(this, Glyph.GEAR, diameter, GlassSurface.Tone.FROST, Color.WHITE)
+        inputs.focusKey = "top:inputs"
+        network.focusKey = "top:network"
+        gear.focusKey = "top:settings"
+        inputs.setOnClickListener {
+            openSystem(
+                listOf("android.media.tv.action.SETUP_INPUTS", "android.settings.INPUT_METHOD_SETTINGS"),
+                "Input selection is unavailable on this device"
+            )
+        }
+        network.setOnClickListener {
+            openSystem(listOf(Settings.ACTION_WIFI_SETTINGS), "Network settings are unavailable on this device")
+        }
+        gear.setOnClickListener {
+            openSystem(listOf(Settings.ACTION_SETTINGS), "Settings are unavailable on this device")
+        }
+        for (b in listOf(inputs, network, gear)) {
+            val lp = LinearLayout.LayoutParams(WRAP, WRAP)
+            lp.leftMargin = -Ui.px(4)
+            lp.rightMargin = -Ui.px(4)
+            buttons.addView(b, lp)
+        }
+        val buttonParams = FrameLayout.LayoutParams(WRAP, WRAP)
+        buttonParams.gravity = Gravity.TOP or Gravity.END
+        buttonParams.topMargin = Ui.px(62) - Ui.px(12)
+        buttonParams.rightMargin = Ui.px(81) - Ui.px(12)
+        content.addView(buttons, buttonParams)
+
+        dock = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(46f))
+        dock.orientation = LinearLayout.HORIZONTAL
+        dock.gravity = Gravity.CENTER
+        val dockParams = FrameLayout.LayoutParams(Ui.px(1757), Ui.px(124))
+        dockParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        dockParams.bottomMargin = Ui.px(60)
+        content.addView(dock, dockParams)
+
+        overlay = AllAppsOverlay(this, { launchFromOverlay(it) }, { togglePin(it) })
+        root.addView(overlay, FrameLayout.LayoutParams(MATCH, MATCH))
 
         notice = NoticeView(this)
         val noticeParams = FrameLayout.LayoutParams(WRAP, WRAP)
         noticeParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
-        noticeParams.bottomMargin = Ui.px(40)
+        noticeParams.bottomMargin = Ui.px(230)
         root.addView(notice, noticeParams)
+    }
 
-        val spinner = LoadingView(this)
-        loading = spinner
-        root.addView(spinner, FrameLayout.LayoutParams(MATCH, MATCH))
+    private fun loadWallpaper() {
+        val metrics = resources.displayMetrics
+        val w = min(metrics.widthPixels, 1600)
+        val h = min(metrics.heightPixels, 900)
+        executor.execute {
+            val bmp: Bitmap = try {
+                val id = resources.getIdentifier("wallpaper", "drawable", packageName)
+                if (id != 0) decodeSampled(id, metrics.widthPixels, metrics.heightPixels) else WallpaperArt.render(w, h)
+            } catch (t: Throwable) {
+                WallpaperArt.render(w, h)
+            }
+            handler.post { if (!isDestroyed) wallpaper.setBitmap(bmp) }
+        }
+    }
+
+    private fun decodeSampled(resId: Int, reqW: Int, reqH: Int): Bitmap {
+        val bounds = BitmapFactory.Options()
+        bounds.inJustDecodeBounds = true
+        BitmapFactory.decodeResource(resources, resId, bounds)
+        var sample = 1
+        while (bounds.outWidth / (sample * 2) >= reqW && bounds.outHeight / (sample * 2) >= reqH) sample *= 2
+        val opts = BitmapFactory.Options()
+        opts.inSampleSize = sample
+        return BitmapFactory.decodeResource(resources, resId, opts) ?: throw IllegalStateException("wallpaper decode failed")
     }
 
     // ---- data ------------------------------------------------------------------------
@@ -2733,66 +2286,65 @@ class MainActivity : Activity(), LauncherHost {
             } catch (t: Throwable) {
                 emptyList()
             }
-            val built = try {
-                HeroFactory.build(list)
-            } catch (t: Throwable) {
-                emptyList()
-            }
             handler.post {
-                if (token == loadToken && !isDestroyed) applyData(list, built)
+                if (token == loadToken && !isDestroyed) {
+                    apps = list
+                    val key = (currentFocus as? FocusGlassView)?.focusKey ?: lastDockKey
+                    rebuildDock(key, !overlay.isOpen)
+                }
             }
         }
     }
 
-    private fun applyData(newApps: List<AppEntry>, newHeroes: List<HeroItem>) {
-        val focusedKey = (currentFocus as? FocusGlassView)?.focusKey ?: lastFocusKey
-        val navFocused = currentFocus is NavTabView
-        apps = newApps
-        heroes = newHeroes
-        rebuildPages(focusedKey, navFocused)
-        loading?.let { spinner ->
-            spinner.animate().alpha(0f).setDuration(420L).withEndAction {
-                root.removeView(spinner)
-            }.start()
-            loading = null
+    private fun rebuildDock(focusKey: String?, restoreFocus: Boolean) {
+        dockTiles.clear()
+        dock.removeAllViews()
+        val pinned = dockStore.resolve(apps)
+        val total = pinned.size + 1
+        pinned.forEachIndexed { index, entry ->
+            val tile = DockTile(this, entry)
+            val key = "dock:" + entry.packageName
+            tile.focusKey = key
+            tile.setOnClickListener { launchApp(entry) }
+            tile.isLongClickable = true
+            tile.setOnLongClickListener {
+                togglePin(entry)
+                true
+            }
+            tile.onFocusGained = { onDockFocused(key, index, total) }
+            tile.playing = isPlayingPackage(entry.packageName)
+            addDockTile(tile)
         }
+        val grid = DockTile(this, null)
+        grid.focusKey = "dock:grid"
+        grid.setOnClickListener { openAllApps() }
+        grid.onFocusGained = { onDockFocused("dock:grid", total - 1, total) }
+        addDockTile(grid)
+        if (restoreFocus) runAfterLayout { focusDock(focusKey) }
     }
 
-    private fun rebuildPages(focusKey: String?, focusNav: Boolean) {
-        pages.forEach { it.hero?.stopRotation() }
-        pageHost.removeAllViews()
-        if (heroes.isEmpty()) return
-        val factory = PageFactory(this, this)
-        val recentList = recents.get()
-        val built = listOf(
-            factory.buildHome(apps, recentList, heroes),
-            factory.buildMovies(apps, recentList),
-            factory.buildShows(apps),
-            factory.buildApps(apps),
-            factory.buildSettings(apps.size)
-        )
-        pages = built
-        built.forEachIndexed { i, page ->
-            page.stage.visibility = if (i == currentPage) View.VISIBLE else View.GONE
-            pageHost.addView(page.stage, FrameLayout.LayoutParams(MATCH, MATCH))
-        }
-        updateTabSelection()
-        built[currentPage].stage.suppressNextAnimation()
-        runAfterLayout {
-            if (focusNav) {
-                tabs[currentPage].requestFocus()
-            } else {
-                val page = pages.getOrNull(currentPage)
-                val target = (if (focusKey != null) page?.findKey(focusKey) else null) ?: page?.defaultFocus()
-                target?.requestFocus()
-            }
-            if (currentPage == 0) pages[0].hero?.startRotation()
-        }
+    private fun addDockTile(tile: DockTile) {
+        val lp = LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight)
+        lp.leftMargin = -Ui.px(12)
+        lp.rightMargin = -Ui.px(12)
+        dock.addView(tile, lp)
+        dockTiles.add(tile)
+    }
+
+    private fun focusDock(key: String?) {
+        val target = (if (key != null) dock.findFocusGlass { it.focusKey == key } else null)
+            ?: dock.findFocusGlass { true }
+        target?.requestFocus()
+    }
+
+    private fun onDockFocused(key: String, index: Int, total: Int) {
+        lastDockKey = key
+        val fraction = if (total > 1) index.toFloat() / (total - 1) else 0.5f
+        wallpaper.panTo((fraction - 0.5f) * 2f)
     }
 
     private fun runAfterLayout(block: () -> Unit) {
-        val observer = root.viewTreeObserver
-        observer.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+        root.viewTreeObserver.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
             override fun onGlobalLayout() {
                 val vto = root.viewTreeObserver
                 if (vto.isAlive) vto.removeOnGlobalLayoutListener(this)
@@ -2802,151 +2354,90 @@ class MainActivity : Activity(), LauncherHost {
         root.requestLayout()
     }
 
-    // ---- navigation ------------------------------------------------------------------
+    // ---- actions ---------------------------------------------------------------------
 
-    private fun updateTabSelection() {
-        tabs.forEachIndexed { i, tab -> tab.selectedTab = i == currentPage }
-    }
-
-    private fun showPage(index: Int) {
-        if (pages.isEmpty()) {
-            currentPage = index
-            updateTabSelection()
-            return
-        }
-        if (index == currentPage && pages[index].stage.visibility == View.VISIBLE) {
-            updateTabSelection()
-            return
-        }
-        val oldIndex = currentPage
-        currentPage = index
-        updateTabSelection()
-        pages.forEachIndexed { i, page ->
-            if (i != index && i != oldIndex) {
-                page.stage.animate().cancel()
-                page.stage.visibility = View.GONE
-            }
-        }
-        val incoming = pages[index].stage
-        incoming.animate().cancel()
-        incoming.resetScroll()
-        incoming.visibility = View.VISIBLE
-        incoming.alpha = 0f
-        incoming.translationY = Ui.s(26f)
-        incoming.animate().alpha(1f).translationY(0f).setDuration(280L)
-            .setInterpolator(DecelerateInterpolator(1.5f)).start()
-        if (oldIndex != index) {
-            val outgoing = pages[oldIndex].stage
-            outgoing.animate().cancel()
-            outgoing.animate().alpha(0f).setDuration(140L).withEndAction {
-                if (currentPage != oldIndex) {
-                    outgoing.visibility = View.GONE
-                    outgoing.alpha = 1f
-                }
-            }.start()
-        }
-        if (index == 0) {
-            pages[0].hero?.startRotation()
-            pages[0].hero?.currentItem()?.let {
-                heroOwnsAmbient = true
-                ambient.setColors(it.accentA, it.accentB)
-            }
-        } else {
-            pages[0].hero?.stopRotation()
-            heroOwnsAmbient = false
-            ambient.setColors(Palette.silver, Palette.secondary(Palette.silver))
-        }
-    }
-
-    private fun enterContent() {
-        val page = pages.getOrNull(currentPage) ?: return
-        val remembered = pageFocusKeys[currentPage]?.let { page.findKey(it) }
-        (remembered ?: page.defaultFocus())?.requestFocus()
-    }
-
-    private fun handleBack() {
-        val focused = currentFocus
-        if (focused is NavTabView) {
-            if (currentPage != 0) {
-                showPage(0)
-                tabs[0].requestFocus()
-            }
-        } else {
-            tabs.getOrNull(currentPage)?.requestFocus()
-        }
-    }
-
-    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
-        if (keyCode == KeyEvent.KEYCODE_BACK) {
-            if (event == null || event.repeatCount == 0) handleBack()
-            return true
-        }
-        return super.onKeyDown(keyCode, event)
-    }
-
-    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
-        if (event != null && event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_DPAD_UP) {
-            val focused = currentFocus
-            if (focused != null && focused is FocusGlassView && focused !is NavTabView) {
-                val next = focused.focusSearch(View.FOCUS_UP)
-                if (next == null || next is NavTabView) {
-                    tabs.getOrNull(currentPage)?.requestFocus()
-                    return true
-                }
-            }
-        }
-        return super.dispatchKeyEvent(event)
-    }
-
-    // ---- LauncherHost ----------------------------------------------------------------
-
-    override fun launchApp(entry: AppEntry) {
+    private fun launchApp(entry: AppEntry) {
         if (AppLauncher.launch(this, entry)) {
             recents.push(entry.packageName)
-            recentsDirty = true
         } else {
             notice.show("Unable to open " + entry.label)
         }
     }
 
-    override fun openSetting(action: SettingsAction) {
-        when (action.id) {
-            "refresh" -> {
-                notice.show("Refreshing applications")
-                reloadApps()
-            }
-            "clear" -> {
-                recents.clear()
-                notice.show("Recently opened apps cleared")
-                rebuildPages(lastFocusKey, false)
-            }
-            else -> if (!AppLauncher.openSetting(this, action)) notice.show("Settings are unavailable on this device")
+    private fun launchFromOverlay(entry: AppEntry) {
+        closeAllApps(false)
+        launchApp(entry)
+    }
+
+    private fun togglePin(entry: AppEntry) {
+        when (dockStore.toggle(entry.packageName)) {
+            1 -> notice.show(entry.label + " added to the dock")
+            0 -> notice.show(entry.label + " removed from the dock")
+            else -> notice.show("The dock is full. Hold OK on a dock app to remove it first")
+        }
+        val key = if (overlay.isOpen) null else "dock:grid"
+        rebuildDock(key, !overlay.isOpen)
+    }
+
+    private fun openSystem(actions: List<String>, failure: String) {
+        if (!AppLauncher.openSetting(this, actions)) notice.show(failure)
+    }
+
+    private fun openAllApps() {
+        overlay.populate(apps)
+        content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        overlay.open()
+        runAfterLayout { overlay.firstFocusable()?.requestFocus() }
+    }
+
+    private fun closeAllApps(restoreFocus: Boolean) {
+        overlay.close()
+        content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        if (restoreFocus) runAfterLayout { focusDock("dock:grid") }
+    }
+
+    private fun onNowPlaying(np: NowPlaying?) {
+        nowPlaying = np
+        pill.update(np)
+        for (tile in dockTiles) {
+            val pkg = tile.packageName
+            tile.playing = np != null && np.playing && pkg != null && pkg == np.packageName
         }
     }
 
-    override fun selectTab(index: Int, focusContent: Boolean) {
-        showPage(index)
-        if (focusContent) {
-            runAfterLayout { enterContent() }
-        } else {
-            tabs.getOrNull(index)?.requestFocus()
+    private fun isPlayingPackage(pkg: String): Boolean {
+        val np = nowPlaying
+        return np != null && np.playing && np.packageName == pkg
+    }
+
+    private fun onMediaAccessDenied() {
+        val prefs = getSharedPreferences("sambhav_launcher", Context.MODE_PRIVATE)
+        if (!prefs.getBoolean("np_hint_shown", false)) {
+            prefs.edit().putBoolean("np_hint_shown", true).apply()
+            handler.postDelayed(
+                { notice.show("Enable notification access for Sambhav TV OS to show now playing") },
+                2500L
+            )
         }
     }
 
-    override fun onContentFocused(key: String, accentA: Int, accentB: Int) {
-        lastFocusKey = key
-        pageFocusKeys[currentPage] = key
-        heroOwnsAmbient = key.startsWith("hero:")
-        ambient.setColors(accentA, accentB)
-    }
+    // ---- keys ------------------------------------------------------------------------
 
-    override fun onHeroItemChanged(item: HeroItem) {
-        if (heroOwnsAmbient && currentPage == 0) ambient.setColors(item.accentA, item.accentB)
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event == null || event.repeatCount == 0) {
+                if (overlay.isOpen) {
+                    closeAllApps(true)
+                } else if (currentFocus !is DockTile) {
+                    focusDock(lastDockKey)
+                }
+            }
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
     }
 
     companion object {
-        private const val STATE_PAGE = "state_page"
         private const val STATE_FOCUS = "state_focus"
-        private val TAB_NAMES = listOf("Home", "Movies", "Shows", "Apps", "Settings")
     }
 }
