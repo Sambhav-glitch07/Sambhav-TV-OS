@@ -2317,3 +2317,636 @@ class LoadingView(context: Context) : View(context) {
         }
     }
 }
+
+// =====================================================================================
+//  SECTION 11 - Pages
+// =====================================================================================
+
+class PageContent(val id: String, val stage: VerticalStage, val hero: HeroView?) {
+    fun findKey(key: String): View? = stage.findFocusGlass { it.focusKey == key }
+
+    fun defaultFocus(): View? = hero?.primaryButton ?: stage.findFocusGlass { true }
+}
+
+class PageFactory(private val context: Context, private val host: LauncherHost) {
+
+    private fun newStage(anchor: Float): VerticalStage {
+        val stage = VerticalStage(context)
+        stage.anchorTop = Ui.s(anchor)
+        stage.column.setPadding(0, 0, 0, Ui.px(120))
+        return stage
+    }
+
+    private fun section(header: View, row: CarouselRow): LinearLayout {
+        val box = LinearLayout(context)
+        box.orientation = LinearLayout.VERTICAL
+        box.clipChildren = false
+        box.clipToPadding = false
+        box.addView(header, LinearLayout.LayoutParams(MATCH, Ui.px(SECTION_HEADER_HEIGHT)))
+        box.addView(row, LinearLayout.LayoutParams(MATCH, row.rowHeight))
+        return box
+    }
+
+    private fun header(title: String, subtitle: String? = null): SectionHeaderView =
+        SectionHeaderView(context, title, subtitle)
+
+    private fun newRow(height: Int): CarouselRow =
+        CarouselRow(context, height, Ui.s(96f) - Ui.s(TILE_BLEED))
+
+    private fun tilesRow(entries: List<AppEntry>, style: TileStyle, prefix: String): CarouselRow {
+        val row = newRow(AppTile.heightFor(style))
+        for (entry in entries) {
+            val tile = AppTile(context, entry, style)
+            val key = prefix + ":" + entry.packageName
+            tile.focusKey = key
+            tile.setOnClickListener { host.launchApp(entry) }
+            tile.onFocusGained = { host.onContentFocused(key, entry.accent, Palette.secondary(entry.accent)) }
+            row.track.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
+        }
+        return row
+    }
+
+    private fun settingsRow(actions: List<SettingsAction>, info: View? = null): CarouselRow {
+        val row = newRow(SettingsTile.heightFor())
+        for (action in actions) {
+            val tile = SettingsTile(context, action)
+            val key = "set:" + action.id
+            tile.focusKey = key
+            tile.setOnClickListener { host.openSetting(action) }
+            tile.onFocusGained = { host.onContentFocused(key, Palette.silver, Palette.secondary(Palette.silver)) }
+            row.track.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
+        }
+        if (info != null) row.track.addView(info, LinearLayout.LayoutParams(WRAP, SettingsTile.heightFor()))
+        return row
+    }
+
+    private fun addEmpty(stage: VerticalStage, title: String, message: String) {
+        val box = LinearLayout(context)
+        box.orientation = LinearLayout.VERTICAL
+        box.clipChildren = false
+        val panelParams = LinearLayout.LayoutParams(WRAP, WRAP)
+        panelParams.leftMargin = Ui.px(96) - Ui.px(TILE_BLEED.toInt())
+        box.addView(EmptyPanelView(context, title, message), panelParams)
+        val button = GlassButton(context, "Browse Applications", Glyph.GRID, false)
+        button.focusKey = "empty:browse"
+        button.setOnClickListener { host.selectTab(3, true) }
+        button.onFocusGained = { host.onContentFocused("empty:browse", Palette.silver, Palette.secondary(Palette.silver)) }
+        val buttonParams = LinearLayout.LayoutParams(WRAP, WRAP)
+        buttonParams.leftMargin = Ui.px(96) - Ui.px(22)
+        buttonParams.topMargin = Ui.px(20)
+        box.addView(button, buttonParams)
+        stage.column.addView(box, LinearLayout.LayoutParams(MATCH, WRAP))
+    }
+
+    private fun titleView(title: String, subtitle: String): PageTitleView = PageTitleView(context, title, subtitle)
+
+    fun buildHome(apps: List<AppEntry>, recents: List<String>, heroes: List<HeroItem>): PageContent {
+        val stage = newStage(430f)
+        val hero = HeroView(context, heroes, host)
+        stage.column.addView(hero, LinearLayout.LayoutParams(MATCH, Ui.px(HERO_HEIGHT)))
+        stage.onScroll = { hero.applyParallax(it) }
+        if (apps.isEmpty()) {
+            addEmpty(stage, "No applications found", "Install apps from the Play Store to see them here.")
+            return PageContent("home", stage, hero)
+        }
+        val byPackage = apps.associateBy { it.packageName }
+        val recentApps = recents.mapNotNull { byPackage[it] }.take(10)
+        if (recentApps.isNotEmpty()) {
+            stage.column.addView(
+                section(header("Recently Opened", "Pick up where you left off"), tilesRow(recentApps, TileStyle.LANDSCAPE, "recent")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        } else {
+            val suggested = apps.sortedBy { it.category.ordinal }.take(8)
+            stage.column.addView(
+                section(header("Suggested for You", "Based on what is installed"), tilesRow(suggested, TileStyle.LANDSCAPE, "recent")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        }
+        stage.column.addView(
+            section(header("Applications", apps.size.toString() + " installed"), tilesRow(apps, TileStyle.SQUARE, "apps")),
+            LinearLayout.LayoutParams(MATCH, WRAP)
+        )
+        return PageContent("home", stage, hero)
+    }
+
+    fun buildMovies(apps: List<AppEntry>, recents: List<String>): PageContent {
+        val stage = newStage(250f)
+        stage.column.addView(
+            titleView("Movies", "Streaming services and video players on this television"),
+            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
+        )
+        val video = apps.filter { it.category == AppCategory.VIDEO }
+        if (video.isEmpty()) {
+            addEmpty(stage, "No streaming applications found", "Install a streaming or video player app to see it here.")
+        } else {
+            stage.column.addView(
+                section(header("Streaming Services", video.size.toString() + " available"), tilesRow(video, TileStyle.POSTER, "movie")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+            val recentVideo = recents.mapNotNull { pkg -> video.firstOrNull { it.packageName == pkg } }
+            if (recentVideo.isNotEmpty()) {
+                stage.column.addView(
+                    section(header("Continue Watching"), tilesRow(recentVideo, TileStyle.LANDSCAPE, "movie-recent")),
+                    LinearLayout.LayoutParams(MATCH, WRAP)
+                )
+            }
+        }
+        return PageContent("movies", stage, null)
+    }
+
+    fun buildShows(apps: List<AppEntry>): PageContent {
+        val stage = newStage(250f)
+        stage.column.addView(
+            titleView("Shows", "Live channels, series and audio"),
+            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
+        )
+        val video = apps.filter { it.category == AppCategory.VIDEO }
+        val music = apps.filter { it.category == AppCategory.MUSIC }
+        val live = video.filter { app ->
+            val key = (app.packageName + " " + app.label).lowercase(Locale.getDefault())
+            LIVE_HINTS.any { key.contains(it) }
+        }
+        if (video.isEmpty() && music.isEmpty()) {
+            addEmpty(stage, "No show applications found", "Install a TV or streaming app to see it here.")
+        }
+        if (live.isNotEmpty()) {
+            stage.column.addView(
+                section(header("Live and Channels", live.size.toString() + " available"), tilesRow(live, TileStyle.LANDSCAPE, "show-live")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        }
+        if (video.isNotEmpty()) {
+            stage.column.addView(
+                section(header("On Demand", video.size.toString() + " available"), tilesRow(video, TileStyle.LANDSCAPE, "show")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        }
+        if (music.isNotEmpty()) {
+            stage.column.addView(
+                section(header("Music and Audio", music.size.toString() + " available"), tilesRow(music, TileStyle.LANDSCAPE, "show-music")),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        }
+        return PageContent("shows", stage, null)
+    }
+
+    fun buildApps(apps: List<AppEntry>): PageContent {
+        val stage = newStage(250f)
+        stage.column.addView(
+            titleView("Applications", apps.size.toString() + " installed on this television"),
+            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
+        )
+        if (apps.isEmpty()) {
+            addEmpty(stage, "No applications found", "Install apps from the Play Store to see them here.")
+        }
+        for (category in AppCategory.values()) {
+            val list = apps.filter { it.category == category }
+            if (list.isEmpty()) continue
+            stage.column.addView(
+                section(header(category.displayName, list.size.toString()), tilesRow(list, TileStyle.SQUARE, "cat-" + category.name.lowercase(Locale.US))),
+                LinearLayout.LayoutParams(MATCH, WRAP)
+            )
+        }
+        return PageContent("apps", stage, null)
+    }
+
+    fun buildSettings(appCount: Int): PageContent {
+        val stage = newStage(250f)
+        stage.column.addView(
+            titleView("Settings", "Configure your television and this launcher"),
+            LinearLayout.LayoutParams(MATCH, Ui.px(PAGE_TITLE_HEIGHT))
+        )
+        stage.column.addView(
+            section(header("System", "Opens the Android TV settings"), settingsRow(SettingsCatalog.system)),
+            LinearLayout.LayoutParams(MATCH, WRAP)
+        )
+        val metrics = context.resources.displayMetrics
+        val cells = listOf(
+            Pair("DEVICE", (Build.MANUFACTURER + " " + Build.MODEL).trim()),
+            Pair("ANDROID", "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")"),
+            Pair("DISPLAY", metrics.widthPixels.toString() + " x " + metrics.heightPixels),
+            Pair("APPLICATIONS", appCount.toString() + " installed"),
+            Pair("LAUNCHER", "Sambhav TV OS 1.0"),
+            Pair("LANGUAGE", Locale.getDefault().displayLanguage)
+        )
+        stage.column.addView(
+            section(header("Sambhav", "Launcher tools and device information"), settingsRow(SettingsCatalog.launcher, InfoPanelView(context, cells))),
+            LinearLayout.LayoutParams(MATCH, WRAP)
+        )
+        return PageContent("settings", stage, null)
+    }
+
+    companion object {
+        private val LIVE_HINTS = listOf("live", "tv", "jio", "airtel", "tata", "zee", "sony", "hotstar", "channel")
+    }
+}
+
+// =====================================================================================
+//  SECTION 12 - Activity
+// =====================================================================================
+
+class MainActivity : Activity(), LauncherHost {
+    private lateinit var root: FrameLayout
+    private lateinit var ambient: AmbientBackgroundView
+    private lateinit var pageHost: FrameLayout
+    private lateinit var clock: ClockView
+    private lateinit var notice: NoticeView
+    private lateinit var repository: AppRepository
+    private lateinit var recents: RecentsStore
+    private var loading: LoadingView? = null
+    private val tabs = ArrayList<NavTabView>()
+    private var pages: List<PageContent> = emptyList()
+    private var apps: List<AppEntry> = emptyList()
+    private var heroes: List<HeroItem> = emptyList()
+    private var currentPage = 0
+    private var lastFocusKey: String? = null
+    private var heroOwnsAmbient = true
+    private var recentsDirty = false
+    private var loadToken = 0
+    private var receiversRegistered = false
+    private val pageFocusKeys = HashMap<Int, String>()
+    private val handler = Handler(Looper.getMainLooper())
+    private val executor: ExecutorService = Executors.newSingleThreadExecutor()
+    private val reloadRunnable = Runnable { reloadApps() }
+    private val packageReceiver = object : BroadcastReceiver() {
+        override fun onReceive(context: Context?, intent: Intent?) {
+            handler.removeCallbacks(reloadRunnable)
+            handler.postDelayed(reloadRunnable, 800L)
+        }
+    }
+
+    // ---- lifecycle -------------------------------------------------------------------
+
+    override fun onCreate(savedInstanceState: Bundle?) {
+        super.onCreate(savedInstanceState)
+        Ui.init(this)
+        window.setBackgroundDrawable(ColorDrawable(Palette.black))
+        repository = AppRepository(applicationContext)
+        recents = RecentsStore(applicationContext)
+        currentPage = (savedInstanceState?.getInt(STATE_PAGE, 0) ?: 0).coerceIn(0, TAB_NAMES.size - 1)
+        lastFocusKey = savedInstanceState?.getString(STATE_FOCUS)
+        buildShell()
+        setContentView(root)
+        reloadApps()
+    }
+
+    override fun onStart() {
+        super.onStart()
+        if (!receiversRegistered) {
+            val filter = IntentFilter()
+            filter.addAction(Intent.ACTION_PACKAGE_ADDED)
+            filter.addAction(Intent.ACTION_PACKAGE_REMOVED)
+            filter.addAction(Intent.ACTION_PACKAGE_REPLACED)
+            filter.addDataScheme("package")
+            registerReceiver(packageReceiver, filter)
+            receiversRegistered = true
+        }
+    }
+
+    override fun onResume() {
+        super.onResume()
+        clock.refresh()
+        ambient.setRunning(true)
+        if (recentsDirty && pages.isNotEmpty()) {
+            recentsDirty = false
+            rebuildPages(lastFocusKey, false)
+        } else if (currentPage == 0) {
+            pages.getOrNull(0)?.hero?.startRotation()
+        }
+    }
+
+    override fun onPause() {
+        ambient.setRunning(false)
+        pages.getOrNull(0)?.hero?.stopRotation()
+        super.onPause()
+    }
+
+    override fun onStop() {
+        if (receiversRegistered) {
+            try {
+                unregisterReceiver(packageReceiver)
+            } catch (e: IllegalArgumentException) {
+                // already unregistered
+            }
+            receiversRegistered = false
+        }
+        super.onStop()
+    }
+
+    override fun onDestroy() {
+        handler.removeCallbacksAndMessages(null)
+        executor.shutdownNow()
+        super.onDestroy()
+    }
+
+    override fun onSaveInstanceState(outState: Bundle) {
+        super.onSaveInstanceState(outState)
+        outState.putInt(STATE_PAGE, currentPage)
+        outState.putString(STATE_FOCUS, lastFocusKey)
+    }
+
+    override fun onNewIntent(intent: Intent?) {
+        super.onNewIntent(intent)
+        if (intent != null && intent.hasCategory(Intent.CATEGORY_HOME) && pages.isNotEmpty()) {
+            pageFocusKeys.remove(0)
+            showPage(0)
+            runAfterLayout { pages.getOrNull(0)?.defaultFocus()?.requestFocus() }
+        }
+    }
+
+    // ---- shell -----------------------------------------------------------------------
+
+    private fun buildShell() {
+        root = FrameLayout(this)
+        root.setBackgroundColor(Palette.black)
+        root.clipChildren = false
+
+        ambient = AmbientBackgroundView(this)
+        root.addView(ambient, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        pageHost = FrameLayout(this)
+        pageHost.clipChildren = false
+        root.addView(pageHost, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        val scrim = View(this)
+        scrim.background = GradientDrawable(
+            GradientDrawable.Orientation.TOP_BOTTOM,
+            intArrayOf(Ui.alpha(Palette.black, 0.92f), Ui.alpha(Palette.black, 0.55f), Ui.alpha(Palette.black, 0f))
+        )
+        root.addView(scrim, FrameLayout.LayoutParams(MATCH, Ui.px(210)))
+
+        val nav = FrameLayout(this)
+        nav.clipChildren = false
+        root.addView(nav, FrameLayout.LayoutParams(MATCH, Ui.px(140)))
+
+        val brandParams = FrameLayout.LayoutParams(WRAP, WRAP)
+        brandParams.gravity = Gravity.START or Gravity.CENTER_VERTICAL
+        brandParams.leftMargin = Ui.px(96) - Ui.px(6)
+        nav.addView(BrandView(this), brandParams)
+
+        val tabPanel = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(44f))
+        tabPanel.orientation = LinearLayout.HORIZONTAL
+        tabPanel.setPadding(Ui.px(8), 0, Ui.px(8), 0)
+        tabPanel.gravity = Gravity.CENTER_VERTICAL
+        for ((i, name) in TAB_NAMES.withIndex()) {
+            val tab = NavTabView(this, name)
+            tab.focusKey = "nav:" + i
+            tab.selectedTab = i == currentPage
+            tab.onFocusGained = {
+                showPage(i)
+                pages.getOrNull(i)?.stage?.scrollToTop()
+            }
+            tab.onEnterContent = { enterContent() }
+            tab.setOnClickListener { enterContent() }
+            tabs.add(tab)
+            tabPanel.addView(tab, LinearLayout.LayoutParams(WRAP, WRAP))
+        }
+        val tabParams = FrameLayout.LayoutParams(WRAP, Ui.px(76))
+        tabParams.gravity = Gravity.CENTER
+        nav.addView(tabPanel, tabParams)
+
+        clock = ClockView(this)
+        val clockParams = FrameLayout.LayoutParams(WRAP, WRAP)
+        clockParams.gravity = Gravity.END or Gravity.CENTER_VERTICAL
+        clockParams.rightMargin = Ui.px(96) - Ui.px(4)
+        nav.addView(clock, clockParams)
+
+        notice = NoticeView(this)
+        val noticeParams = FrameLayout.LayoutParams(WRAP, WRAP)
+        noticeParams.gravity = Gravity.BOTTOM or Gravity.CENTER_HORIZONTAL
+        noticeParams.bottomMargin = Ui.px(40)
+        root.addView(notice, noticeParams)
+
+        val spinner = LoadingView(this)
+        loading = spinner
+        root.addView(spinner, FrameLayout.LayoutParams(MATCH, MATCH))
+    }
+
+    // ---- data ------------------------------------------------------------------------
+
+    private fun reloadApps() {
+        val token = ++loadToken
+        executor.execute {
+            val list = try {
+                repository.loadInstalled()
+            } catch (t: Throwable) {
+                emptyList()
+            }
+            val built = try {
+                HeroFactory.build(list)
+            } catch (t: Throwable) {
+                emptyList()
+            }
+            handler.post {
+                if (token == loadToken && !isDestroyed) applyData(list, built)
+            }
+        }
+    }
+
+    private fun applyData(newApps: List<AppEntry>, newHeroes: List<HeroItem>) {
+        val focusedKey = (currentFocus as? FocusGlassView)?.focusKey ?: lastFocusKey
+        val navFocused = currentFocus is NavTabView
+        apps = newApps
+        heroes = newHeroes
+        rebuildPages(focusedKey, navFocused)
+        loading?.let { spinner ->
+            spinner.animate().alpha(0f).setDuration(420L).withEndAction {
+                root.removeView(spinner)
+            }.start()
+            loading = null
+        }
+    }
+
+    private fun rebuildPages(focusKey: String?, focusNav: Boolean) {
+        pages.forEach { it.hero?.stopRotation() }
+        pageHost.removeAllViews()
+        if (heroes.isEmpty()) return
+        val factory = PageFactory(this, this)
+        val recentList = recents.get()
+        val built = listOf(
+            factory.buildHome(apps, recentList, heroes),
+            factory.buildMovies(apps, recentList),
+            factory.buildShows(apps),
+            factory.buildApps(apps),
+            factory.buildSettings(apps.size)
+        )
+        pages = built
+        built.forEachIndexed { i, page ->
+            page.stage.visibility = if (i == currentPage) View.VISIBLE else View.GONE
+            pageHost.addView(page.stage, FrameLayout.LayoutParams(MATCH, MATCH))
+        }
+        updateTabSelection()
+        built[currentPage].stage.suppressNextAnimation()
+        runAfterLayout {
+            if (focusNav) {
+                tabs[currentPage].requestFocus()
+            } else {
+                val page = pages.getOrNull(currentPage)
+                val target = (if (focusKey != null) page?.findKey(focusKey) else null) ?: page?.defaultFocus()
+                target?.requestFocus()
+            }
+            if (currentPage == 0) pages[0].hero?.startRotation()
+        }
+    }
+
+    private fun runAfterLayout(block: () -> Unit) {
+        val observer = root.viewTreeObserver
+        observer.addOnGlobalLayoutListener(object : ViewTreeObserver.OnGlobalLayoutListener {
+            override fun onGlobalLayout() {
+                val vto = root.viewTreeObserver
+                if (vto.isAlive) vto.removeOnGlobalLayoutListener(this)
+                block()
+            }
+        })
+        root.requestLayout()
+    }
+
+    // ---- navigation ------------------------------------------------------------------
+
+    private fun updateTabSelection() {
+        tabs.forEachIndexed { i, tab -> tab.selectedTab = i == currentPage }
+    }
+
+    private fun showPage(index: Int) {
+        if (pages.isEmpty()) {
+            currentPage = index
+            updateTabSelection()
+            return
+        }
+        if (index == currentPage && pages[index].stage.visibility == View.VISIBLE) {
+            updateTabSelection()
+            return
+        }
+        val oldIndex = currentPage
+        currentPage = index
+        updateTabSelection()
+        pages.forEachIndexed { i, page ->
+            if (i != index && i != oldIndex) {
+                page.stage.animate().cancel()
+                page.stage.visibility = View.GONE
+            }
+        }
+        val incoming = pages[index].stage
+        incoming.animate().cancel()
+        incoming.resetScroll()
+        incoming.visibility = View.VISIBLE
+        incoming.alpha = 0f
+        incoming.translationY = Ui.s(26f)
+        incoming.animate().alpha(1f).translationY(0f).setDuration(280L)
+            .setInterpolator(DecelerateInterpolator(1.5f)).start()
+        if (oldIndex != index) {
+            val outgoing = pages[oldIndex].stage
+            outgoing.animate().cancel()
+            outgoing.animate().alpha(0f).setDuration(140L).withEndAction {
+                if (currentPage != oldIndex) {
+                    outgoing.visibility = View.GONE
+                    outgoing.alpha = 1f
+                }
+            }.start()
+        }
+        if (index == 0) {
+            pages[0].hero?.startRotation()
+            pages[0].hero?.currentItem()?.let {
+                heroOwnsAmbient = true
+                ambient.setColors(it.accentA, it.accentB)
+            }
+        } else {
+            pages[0].hero?.stopRotation()
+            heroOwnsAmbient = false
+            ambient.setColors(Palette.silver, Palette.secondary(Palette.silver))
+        }
+    }
+
+    private fun enterContent() {
+        val page = pages.getOrNull(currentPage) ?: return
+        val remembered = pageFocusKeys[currentPage]?.let { page.findKey(it) }
+        (remembered ?: page.defaultFocus())?.requestFocus()
+    }
+
+    private fun handleBack() {
+        val focused = currentFocus
+        if (focused is NavTabView) {
+            if (currentPage != 0) {
+                showPage(0)
+                tabs[0].requestFocus()
+            }
+        } else {
+            tabs.getOrNull(currentPage)?.requestFocus()
+        }
+    }
+
+    override fun onKeyDown(keyCode: Int, event: KeyEvent?): Boolean {
+        if (keyCode == KeyEvent.KEYCODE_BACK) {
+            if (event == null || event.repeatCount == 0) handleBack()
+            return true
+        }
+        return super.onKeyDown(keyCode, event)
+    }
+
+    override fun dispatchKeyEvent(event: KeyEvent?): Boolean {
+        if (event != null && event.action == KeyEvent.ACTION_DOWN && event.keyCode == KeyEvent.KEYCODE_DPAD_UP) {
+            val focused = currentFocus
+            if (focused != null && focused is FocusGlassView && focused !is NavTabView) {
+                val next = focused.focusSearch(View.FOCUS_UP)
+                if (next == null || next is NavTabView) {
+                    tabs.getOrNull(currentPage)?.requestFocus()
+                    return true
+                }
+            }
+        }
+        return super.dispatchKeyEvent(event)
+    }
+
+    // ---- LauncherHost ----------------------------------------------------------------
+
+    override fun launchApp(entry: AppEntry) {
+        if (AppLauncher.launch(this, entry)) {
+            recents.push(entry.packageName)
+            recentsDirty = true
+        } else {
+            notice.show("Unable to open " + entry.label)
+        }
+    }
+
+    override fun openSetting(action: SettingsAction) {
+        when (action.id) {
+            "refresh" -> {
+                notice.show("Refreshing applications")
+                reloadApps()
+            }
+            "clear" -> {
+                recents.clear()
+                notice.show("Recently opened apps cleared")
+                rebuildPages(lastFocusKey, false)
+            }
+            else -> if (!AppLauncher.openSetting(this, action)) notice.show("Settings are unavailable on this device")
+        }
+    }
+
+    override fun selectTab(index: Int, focusContent: Boolean) {
+        showPage(index)
+        if (focusContent) {
+            runAfterLayout { enterContent() }
+        } else {
+            tabs.getOrNull(index)?.requestFocus()
+        }
+    }
+
+    override fun onContentFocused(key: String, accentA: Int, accentB: Int) {
+        lastFocusKey = key
+        pageFocusKeys[currentPage] = key
+        heroOwnsAmbient = key.startsWith("hero:")
+        ambient.setColors(accentA, accentB)
+    }
+
+    override fun onHeroItemChanged(item: HeroItem) {
+        if (heroOwnsAmbient && currentPage == 0) ambient.setColors(item.accentA, item.accentB)
+    }
+
+    companion object {
+        private const val STATE_PAGE = "state_page"
+        private const val STATE_FOCUS = "state_focus"
+        private val TAB_NAMES = listOf("Home", "Movies", "Shows", "Apps", "Settings")
+    }
+}
