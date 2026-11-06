@@ -269,10 +269,11 @@ object GrainTexture {
  * between the two layers, exactly like content under a glass pane.
  */
 class GlassSurface(private val tone: Tone) {
-    enum class Tone { SMOKED, FROST, BRIGHT }
+    enum class Tone { SMOKED, FROST, BRIGHT, CLEAR }
 
     val rect = RectF()
     var shadowEnabled = true
+    var glossStrength = 1f
     private var host: View? = null
     private var radius = 0f
     private var accent = 0
@@ -330,11 +331,13 @@ class GlassSurface(private val tone: Tone) {
             Tone.SMOKED -> LinearGradient(0f, t, 0f, b, Color.argb(206, 36, 39, 47), Color.argb(228, 14, 15, 19), Shader.TileMode.CLAMP)
             Tone.FROST -> LinearGradient(0f, t, 0f, b, Color.argb(98, 255, 255, 255), Color.argb(46, 222, 230, 245), Shader.TileMode.CLAMP)
             Tone.BRIGHT -> LinearGradient(0f, t, 0f, b, Color.argb(244, 252, 252, 254), Color.argb(226, 212, 218, 229), Shader.TileMode.CLAMP)
+            Tone.CLEAR -> LinearGradient(0f, t, 0f, b, Color.argb(64, 255, 255, 255), Color.argb(22, 255, 255, 255), Shader.TileMode.CLAMP)
         }
         tintPaint.shader = when (tone) {
             Tone.SMOKED -> LinearGradient(0f, t, 0f, b, Color.argb(138, 20, 22, 30), Color.argb(190, 6, 7, 11), Shader.TileMode.CLAMP)
             Tone.FROST -> LinearGradient(0f, t, 0f, b, Color.argb(74, 255, 255, 255), Color.argb(30, 235, 242, 255), Shader.TileMode.CLAMP)
             Tone.BRIGHT -> LinearGradient(0f, t, 0f, b, Color.argb(216, 250, 251, 254), Color.argb(196, 214, 220, 232), Shader.TileMode.CLAMP)
+            Tone.CLEAR -> LinearGradient(0f, t, 0f, b, Color.argb(44, 255, 255, 255), Color.argb(10, 255, 255, 255), Shader.TileMode.CLAMP)
         }
 
         sheenPath.reset()
@@ -352,6 +355,7 @@ class GlassSurface(private val tone: Tone) {
             Tone.FROST -> 58
             Tone.SMOKED -> 34
             Tone.BRIGHT -> 46
+            Tone.CLEAR -> 66
         }
         topGlowPaint.shader = LinearGradient(
             0f, t, 0f, t + h * 0.5f, Color.argb(topAlpha, 255, 255, 255), Color.argb(0, 255, 255, 255), Shader.TileMode.CLAMP
@@ -381,7 +385,7 @@ class GlassSurface(private val tone: Tone) {
             c.save()
             c.clipPath(clipPath)
             backdropPaint.alpha = fillAlpha
-            Backdrop.draw(c, owner, backdropPaint)
+            Backdrop.draw(c, owner, backdropPaint, tone == Tone.CLEAR)
             c.restore()
             tintPaint.alpha = fillAlpha
             c.drawRoundRect(rect, radius, radius, tintPaint)
@@ -402,6 +406,11 @@ class GlassSurface(private val tone: Tone) {
         if (rect.width() <= 0f) return
         c.save()
         c.clipPath(clipPath)
+        val gloss = (glossStrength.coerceIn(0f, 1f) * 255f).toInt()
+        grainPaint.alpha = if (tone == Tone.CLEAR) gloss / 3 else gloss
+        sheenPaint.alpha = gloss
+        topGlowPaint.alpha = gloss
+        bottomGlowPaint.alpha = gloss
         c.drawRect(rect, grainPaint)
         c.drawPath(sheenPath, sheenPaint)
         c.drawRect(rect, topGlowPaint)
@@ -1563,6 +1572,147 @@ class HomeClockView(context: Context) : View(context) {
     }
 }
 
+class RainClockView(context: Context) : View(context) {
+    private val ring = Ui.s(176f)
+    private val pad = Ui.s(6f)
+    private val accent = 0xFF7FDBFF.toInt()
+    private val calendar = java.util.Calendar.getInstance()
+    private val box = RectF()
+    private val tickPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val trackPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val secPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val minPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val hourPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val timePaint = Ui.textPaint(Ui.s(78f), Color.WHITE, Fonts.light, -0.02f)
+    private val periodPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.75f), Fonts.medium, 0.2f)
+    private val dayPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.95f), Fonts.regular, 0.34f)
+    private val datePaint = Ui.textPaint(Ui.s(18f), Ui.alpha(Color.WHITE, 0.58f), Fonts.regular, 0.30f)
+    private val dayNumPaint = Ui.textPaint(Ui.s(36f), Ui.alpha(Color.WHITE, 0.95f), Fonts.light)
+    private var time = ""
+    private var period = ""
+    private var dayName = ""
+    private var dateLine = ""
+    private var dayNum = ""
+    private var lastMinute = -1
+    private val ticker = object : Runnable {
+        override fun run() {
+            invalidate()
+            postDelayed(this, 200L)
+        }
+    }
+
+    init {
+        tickPaint.color = Color.WHITE
+        tickPaint.strokeWidth = max(1f, Ui.s(1.4f))
+        for (p in listOf(trackPaint, secPaint, minPaint, hourPaint)) p.style = Paint.Style.STROKE
+        trackPaint.color = Ui.alpha(Color.WHITE, 0.13f)
+        trackPaint.strokeWidth = max(1f, Ui.s(2f))
+        secPaint.color = accent
+        secPaint.strokeWidth = Ui.s(3f)
+        secPaint.strokeCap = Paint.Cap.ROUND
+        minPaint.color = Ui.alpha(Color.WHITE, 0.95f)
+        minPaint.strokeWidth = Ui.s(5f)
+        minPaint.strokeCap = Paint.Cap.ROUND
+        hourPaint.color = Ui.alpha(Color.WHITE, 0.55f)
+        hourPaint.strokeWidth = Ui.s(5f)
+        hourPaint.strokeCap = Paint.Cap.ROUND
+        dotPaint.color = Color.WHITE
+        linePaint.color = Color.WHITE
+        linePaint.strokeCap = Paint.Cap.ROUND
+        dayNumPaint.textAlign = Paint.Align.CENTER
+    }
+
+    fun refresh() {
+        calendar.timeInMillis = System.currentTimeMillis()
+        val minute = calendar.get(java.util.Calendar.MINUTE)
+        if (minute == lastMinute) return
+        lastMinute = minute
+        val locale = Locale.getDefault()
+        val now = Date(calendar.timeInMillis)
+        val is24 = DateFormat.is24HourFormat(context)
+        time = SimpleDateFormat(if (is24) "HH:mm" else "h:mm", locale).format(now)
+        period = if (is24) "" else SimpleDateFormat("a", locale).format(now).uppercase(locale)
+        dayName = SimpleDateFormat("EEEE", locale).format(now).uppercase(locale)
+        dateLine = SimpleDateFormat("d MMMM yyyy", locale).format(now).uppercase(locale)
+        dayNum = SimpleDateFormat("d", locale).format(now)
+        invalidate()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(Ui.px(640), Ui.px(200))
+    }
+
+    private fun arc(cx: Float, cy: Float, r: Float, sweep: Float, paint: Paint, canvas: Canvas) {
+        box.set(cx - r, cy - r, cx + r, cy + r)
+        canvas.drawArc(box, -90f, sweep, false, paint)
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        calendar.timeInMillis = System.currentTimeMillis()
+        refresh()
+        val sec = calendar.get(java.util.Calendar.SECOND) + calendar.get(java.util.Calendar.MILLISECOND) / 1000f
+        val min = calendar.get(java.util.Calendar.MINUTE) + sec / 60f
+        val hour = calendar.get(java.util.Calendar.HOUR) + min / 60f
+        val cx = pad + ring / 2f
+        val cy = height / 2f
+        val r0 = ring / 2f
+
+        for (i in 0 until 60) {
+            val major = i % 5 == 0
+            tickPaint.alpha = if (major) 150 else 56
+            val len = Ui.s(if (major) 11f else 5f)
+            canvas.save()
+            canvas.rotate(i * 6f, cx, cy)
+            canvas.drawLine(cx, cy - r0, cx, cy - r0 + len, tickPaint)
+            canvas.restore()
+        }
+        val r1 = r0 - Ui.s(24f)
+        val r2 = r1 - Ui.s(17f)
+        val r3 = r2 - Ui.s(17f)
+        canvas.drawCircle(cx, cy, r1, trackPaint)
+        canvas.drawCircle(cx, cy, r2, trackPaint)
+        canvas.drawCircle(cx, cy, r3, trackPaint)
+        arc(cx, cy, r1, sec / 60f * 360f, secPaint, canvas)
+        arc(cx, cy, r2, min / 60f * 360f, minPaint, canvas)
+        arc(cx, cy, r3, hour / 12f * 360f, hourPaint, canvas)
+        val ang = Math.toRadians((-90f + sec / 60f * 360f).toDouble())
+        val dx = cx + (r1 * cos(ang)).toFloat()
+        val dy = cy + (r1 * sin(ang)).toFloat()
+        dotPaint.color = Ui.alpha(accent, 0.28f)
+        canvas.drawCircle(dx, dy, Ui.s(10f), dotPaint)
+        dotPaint.color = Color.WHITE
+        canvas.drawCircle(dx, dy, Ui.s(4.2f), dotPaint)
+        canvas.drawText(dayNum, cx, Ui.baseline(dayNumPaint, cy), dayNumPaint)
+
+        val x0 = pad + ring + Ui.s(34f)
+        canvas.drawText(time, x0, cy + Ui.s(10f), timePaint)
+        if (period.isNotEmpty()) {
+            canvas.drawText(period, x0 + timePaint.measureText(time) + Ui.s(10f), cy - Ui.s(32f), periodPaint)
+        }
+        val lineY = cy + Ui.s(30f)
+        linePaint.strokeWidth = max(1f, Ui.s(1.6f))
+        linePaint.alpha = 52
+        canvas.drawLine(x0, lineY, x0 + Ui.s(250f), lineY, linePaint)
+        linePaint.alpha = 230
+        linePaint.strokeWidth = Ui.s(2.4f)
+        canvas.drawLine(x0, lineY, x0 + Ui.s(44f), lineY, linePaint)
+        canvas.drawText(dayName, x0, cy + Ui.s(66f), dayPaint)
+        canvas.drawText(dateLine, x0, cy + Ui.s(94f), datePaint)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        post(ticker)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(ticker)
+        super.onDetachedFromWindow()
+    }
+}
+
 // =====================================================================================
 //  SECTION 4 - Now playing (MediaSession) integration
 // =====================================================================================
@@ -1994,7 +2144,7 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
     val tileWidth: Int = (cardW + bleed * 2).roundToInt()
     val tileHeight: Int = (cardH + roomY * 2).roundToInt()
     val packageName: String? get() = entry?.packageName
-    private val frost = GlassSurface(GlassSurface.Tone.FROST).attach(this)
+    private val frost = GlassSurface(GlassSurface.Tone.CLEAR).attach(this)
     private val dark = GlassSurface(GlassSurface.Tone.SMOKED).attach(this)
     private val cardRect = RectF()
     private val tipRect = RectF()
@@ -2025,6 +2175,7 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
         dotPaint.color = Color.WHITE
         tipFill.color = Color.rgb(12, 16, 24)
         dark.shadowEnabled = false
+        frost.glossStrength = if (entry?.banner != null) 0.3f else 0.8f
         tipText.textAlign = Paint.Align.CENTER
     }
 
@@ -2065,7 +2216,7 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
     private fun drawContent(canvas: Canvas, f: Float, app: AppEntry) {
         val banner = app.banner
         if (banner != null) {
-            mediaPaint.alpha = (190f + 65f * f).toInt()
+            mediaPaint.alpha = 255
             BitmapUtil.drawCropped(canvas, banner, cardRect, mediaPaint)
         } else {
             IconPlate.draw(
@@ -2073,8 +2224,6 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
                 cardRect.centerX(), cardRect.centerY(), cardRect.height() * 0.64f
             )
         }
-        veilPaint.alpha = ((1f - f) * 36f).toInt()
-        canvas.drawRect(cardRect, veilPaint)
     }
 
     private fun drawGridDots(canvas: Canvas) {
@@ -2108,17 +2257,91 @@ class DockTile(context: Context, private val entry: AppEntry?) : FocusGlassView(
 // =====================================================================================
 
 class OverlayTitleView(context: Context) : View(context) {
-    private val titlePaint = Ui.textPaint(Ui.s(58f), Color.WHITE, Fonts.light, -0.01f)
-    private val hintPaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.55f), Fonts.regular, 0.01f)
+    var count = 0
+        set(value) {
+            field = value
+            invalidate()
+        }
+    private val capsPaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.66f), Fonts.regular, 0.36f)
+    private val titlePaint = Ui.textPaint(Ui.s(72f), Color.WHITE, Fonts.light, -0.01f)
+    private val countPaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.66f), Fonts.regular, 0.30f)
+    private val hintPaint = Ui.textPaint(Ui.s(17f), Ui.alpha(Color.WHITE, 0.42f), Fonts.regular, 0.30f)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+
+    init {
+        countPaint.textAlign = Paint.Align.RIGHT
+        linePaint.color = Color.WHITE
+        linePaint.strokeCap = Paint.Cap.ROUND
+    }
 
     override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
-        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(230))
+        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), Ui.px(260))
     }
 
     override fun onDraw(canvas: Canvas) {
         val x = Ui.s(96f)
-        canvas.drawText("All Apps", x, Ui.s(140f), titlePaint)
-        canvas.drawText("Hold OK on an app to add it to the dock or remove it", x, Ui.s(188f), hintPaint)
+        val right = width - x
+        canvas.drawText("APPLICATIONS", x, Ui.s(84f), capsPaint)
+        canvas.drawText("All Apps", x, Ui.s(160f), titlePaint)
+        canvas.drawText(count.toString() + "  INSTALLED", right, Ui.s(160f), countPaint)
+        linePaint.strokeWidth = max(1f, Ui.s(1.4f))
+        linePaint.alpha = 50
+        canvas.drawLine(x, Ui.s(198f), right, Ui.s(198f), linePaint)
+        linePaint.strokeWidth = Ui.s(2.4f)
+        linePaint.alpha = 235
+        canvas.drawLine(x, Ui.s(198f), x + Ui.s(64f), Ui.s(198f), linePaint)
+        canvas.drawText("HOLD  OK  TO  PIN  OR  UNPIN  FROM  THE  DOCK", x, Ui.s(236f), hintPaint)
+    }
+}
+
+/** Minimal icon cell. The clear glass card only appears under focus. */
+class AppCell(context: Context, private val entry: AppEntry, pinnedInitially: Boolean) :
+    FocusGlassView(context, 1.08f, Ui.s(6f)) {
+    private val bleed = Ui.s(24f)
+    private val cardW = Ui.s(176f)
+    private val cardH = Ui.s(172f)
+    val cellWidth: Int = (cardW + bleed * 2).roundToInt()
+    val cellHeight: Int = (cardH + bleed * 2).roundToInt()
+    private val surface = GlassSurface(GlassSurface.Tone.CLEAR).attach(this)
+    private val cardRect = RectF()
+    private val labelPaint = Ui.textPaint(Ui.s(21f), Color.WHITE, Fonts.regular, 0.01f)
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private var labelText = entry.label
+    var pinned: Boolean = pinnedInitially
+        set(value) {
+            field = value
+            invalidate()
+        }
+
+    init {
+        contentDescription = entry.label
+        labelPaint.textAlign = Paint.Align.CENTER
+        dotPaint.color = entry.accent
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(cellWidth, cellHeight)
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        cardRect.set(bleed, bleed, w - bleed, h - bleed)
+        surface.layout(cardRect.left, cardRect.top, cardRect.right, cardRect.bottom, Ui.s(30f))
+        pivotX = w / 2f
+        pivotY = h / 2f
+        labelText = TextUtils.ellipsize(entry.label, labelPaint, cardW - Ui.s(18f), TextUtils.TruncateAt.END).toString()
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val f = focusFraction
+        if (f > 0.01f) {
+            surface.drawBase(canvas, f, (f * 255f).toInt())
+            surface.drawGloss(canvas, f)
+        }
+        IconPlate.draw(canvas, entry.icon, entry.initial, entry.accent, cardRect.centerX(), cardRect.top + Ui.s(66f), Ui.s(96f))
+        labelPaint.alpha = (255f * (0.74f + 0.26f * f)).toInt()
+        canvas.drawText(labelText, cardRect.centerX(), cardRect.bottom - Ui.s(28f), labelPaint)
+        if (pinned) canvas.drawCircle(cardRect.centerX(), cardRect.bottom - Ui.s(11f), Ui.s(3.4f), dotPaint)
     }
 }
 
@@ -2126,49 +2349,61 @@ class AllAppsOverlay(
     context: Context,
     private val onLaunch: (AppEntry) -> Unit,
     private val onPinToggle: (AppEntry) -> Unit
-) : SheetLayout(context, { w, h ->
-    RectF(Ui.s(40f), Ui.s(36f), w - Ui.s(40f), h + Ui.s(240f))
-}) {
+) : SheetLayout(context, { _, _ -> RectF() }) {
     private val stage = VerticalStage(context)
+    private val titleView = OverlayTitleView(context)
     private var firstTile: View? = null
     var isOpen = false
         private set
 
     init {
         visibility = View.GONE
-        stage.anchorTop = Ui.s(200f)
+        stage.anchorTop = Ui.s(120f)
         stage.column.setPadding(0, 0, 0, Ui.px(120))
         addView(stage, FrameLayout.LayoutParams(MATCH, MATCH))
     }
 
     fun firstFocusable(): View? = firstTile
 
-    fun populate(apps: List<AppEntry>) {
+    fun populate(apps: List<AppEntry>, isPinned: (String) -> Boolean) {
         stage.column.removeAllViews()
         stage.resetScroll()
         firstTile = null
-        stage.column.addView(OverlayTitleView(context), LinearLayout.LayoutParams(MATCH, Ui.px(230)))
-        val perRow = 7
+        titleView.count = apps.size
+        stage.column.addView(titleView, LinearLayout.LayoutParams(MATCH, Ui.px(260)))
+        val perRow = 8
         var index = 0
         while (index < apps.size) {
             val row = LinearLayout(context)
             row.orientation = LinearLayout.HORIZONTAL
             row.clipChildren = false
-            row.setPadding(Ui.px(96) - Ui.px(TILE_BLEED.toInt()), 0, 0, 0)
+            row.setPadding(Ui.px(96) - Ui.px(24), 0, 0, 0)
+            var rowHeight = 0
             for (entry in apps.subList(index, min(index + perRow, apps.size))) {
-                val tile = AppTile(context, entry, TileStyle.SQUARE)
-                tile.focusKey = "all:" + entry.packageName
-                tile.setOnClickListener { onLaunch(entry) }
-                tile.isLongClickable = true
-                tile.setOnLongClickListener {
+                val cell = AppCell(context, entry, isPinned(entry.packageName))
+                cell.focusKey = "all:" + entry.packageName
+                cell.setOnClickListener { onLaunch(entry) }
+                cell.isLongClickable = true
+                cell.setOnLongClickListener {
                     onPinToggle(entry)
                     true
                 }
-                row.addView(tile, LinearLayout.LayoutParams(tile.tileWidth, tile.tileHeight))
-                if (firstTile == null) firstTile = tile
+                rowHeight = cell.cellHeight
+                row.addView(cell, LinearLayout.LayoutParams(cell.cellWidth, cell.cellHeight))
+                if (firstTile == null) firstTile = cell
             }
-            stage.column.addView(row, LinearLayout.LayoutParams(MATCH, AppTile.heightFor(TileStyle.SQUARE)))
+            stage.column.addView(row, LinearLayout.LayoutParams(MATCH, rowHeight))
             index += perRow
+        }
+    }
+
+    fun refreshPinned(isPinned: (String) -> Boolean) {
+        for (r in 0 until stage.column.childCount) {
+            val row = stage.column.getChildAt(r) as? LinearLayout ?: continue
+            for (c in 0 until row.childCount) {
+                val cell = row.getChildAt(c) as? AppCell ?: continue
+                cell.pinned = isPinned(cell.focusKey.removePrefix("all:"))
+            }
         }
     }
 
@@ -2197,7 +2432,7 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var wallpaper: WallpaperView
     private lateinit var content: FrameLayout
-    private lateinit var clock: HomeClockView
+    private lateinit var clock: RainClockView
     private lateinit var pill: NowPlayingPill
     private lateinit var dock: GlassPanelLayout
     private lateinit var overlay: AllAppsOverlay
@@ -2312,11 +2547,11 @@ class MainActivity : Activity() {
         content.clipToPadding = false
         root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        clock = HomeClockView(this)
+        clock = RainClockView(this)
         val clockParams = FrameLayout.LayoutParams(WRAP, WRAP)
         clockParams.gravity = Gravity.TOP or Gravity.START
         clockParams.leftMargin = Ui.px(81)
-        clockParams.topMargin = Ui.px(54)
+        clockParams.topMargin = Ui.px(34)
         content.addView(clock, clockParams)
 
         pill = NowPlayingPill(this)
@@ -2331,10 +2566,10 @@ class MainActivity : Activity() {
         buttons.clipChildren = false
         buttons.clipToPadding = false
         val diameter = Ui.s(69f)
-        val background = RoundButton(this, Glyph.PALETTE, diameter, GlassSurface.Tone.FROST, Color.WHITE)
-        val inputs = RoundButton(this, Glyph.INPUT, diameter, GlassSurface.Tone.FROST, Color.WHITE)
-        val network = RoundButton(this, Glyph.WIFI, diameter, GlassSurface.Tone.FROST, Color.WHITE)
-        val gear = RoundButton(this, Glyph.GEAR, diameter, GlassSurface.Tone.FROST, Color.WHITE)
+        val background = RoundButton(this, Glyph.PALETTE, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
+        val inputs = RoundButton(this, Glyph.INPUT, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
+        val network = RoundButton(this, Glyph.WIFI, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
+        val gear = RoundButton(this, Glyph.GEAR, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
         background.focusKey = "top:background"
         inputs.focusKey = "top:inputs"
         network.focusKey = "top:network"
@@ -2364,7 +2599,7 @@ class MainActivity : Activity() {
         buttonParams.rightMargin = Ui.px(81) - Ui.px(12)
         content.addView(buttons, buttonParams)
 
-        dock = GlassPanelLayout(this, GlassSurface.Tone.FROST, Ui.s(50f))
+        dock = GlassPanelLayout(this, GlassSurface.Tone.CLEAR, Ui.s(50f))
         dock.orientation = LinearLayout.HORIZONTAL
         dock.gravity = Gravity.CENTER
         val dockParams = FrameLayout.LayoutParams(Ui.px(1757), Ui.px(124))
@@ -2407,7 +2642,7 @@ class MainActivity : Activity() {
             }
             handler.post {
                 if (token == wallToken && !isDestroyed) {
-                    Backdrop.set(blur, metrics.widthPixels, metrics.heightPixels)
+                    Backdrop.set(blur, bmp, metrics.widthPixels, metrics.heightPixels)
                     wallpaper.setBitmap(bmp)
                     root.invalidateTree()
                 }
@@ -2615,6 +2850,7 @@ class MainActivity : Activity() {
         }
         val key = if (overlay.isOpen) null else "dock:grid"
         rebuildDock(key, !overlay.isOpen)
+        if (overlay.isOpen) overlay.refreshPinned { dockStore.isPinned(it) }
     }
 
     private fun openSystem(actions: List<String>, failure: String) {
@@ -2623,7 +2859,7 @@ class MainActivity : Activity() {
 
     private fun openAllApps() {
         if (bgMenu.isOpen) return
-        overlay.populate(apps)
+        overlay.populate(apps) { dockStore.isPinned(it) }
         content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         overlay.open()
         runAfterLayout { overlay.firstFocusable()?.requestFocus() }
@@ -2696,24 +2932,29 @@ class MainActivity : Activity() {
 /** Heavily blurred copy of the wallpaper. Glass surfaces draw it behind themselves for a true frosted look. */
 object Backdrop {
     private var blurred: Bitmap? = null
+    private var sharp: Bitmap? = null
     private val dst = RectF()
     private val loc = IntArray(2)
-    private val filter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(1.45f) })
+    private val frostFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(1.45f) })
+    private val clearFilter = ColorMatrixColorFilter(ColorMatrix().apply { setSaturation(1.18f) })
 
     fun isReady(): Boolean = blurred != null
 
-    fun set(bmp: Bitmap?, screenW: Int, screenH: Int) {
-        blurred = bmp
+    fun set(blur: Bitmap?, original: Bitmap?, screenW: Int, screenH: Int) {
+        blurred = blur
+        sharp = original
         val extra = screenW * 0.03f
         dst.set(-extra, -extra * 0.5f, screenW + extra, screenH + extra * 0.5f)
     }
 
-    fun draw(c: Canvas, view: View, paint: Paint) {
-        val bmp = blurred ?: return
-        paint.colorFilter = filter
+    /** Frosted glass samples the blurred copy. Clear glass samples the sharp wallpaper with a slight lens zoom. */
+    fun draw(c: Canvas, view: View, paint: Paint, clear: Boolean = false) {
+        val bmp = (if (clear) sharp else blurred) ?: blurred ?: return
+        paint.colorFilter = if (clear) clearFilter else frostFilter
         view.getLocationInWindow(loc)
         c.save()
         c.translate(-loc[0].toFloat(), -loc[1].toFloat())
+        if (clear) c.scale(1.05f, 1.05f, loc[0] + view.width / 2f, loc[1] + view.height / 2f)
         BitmapUtil.drawCropped(c, bmp, dst, paint)
         c.restore()
     }
