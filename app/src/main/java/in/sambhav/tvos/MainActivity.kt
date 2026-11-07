@@ -1943,12 +1943,26 @@ class NowPlayingTracker(
     private val onChange: (NowPlaying?) -> Unit,
     private val onDenied: () -> Unit
 ) {
+    private val appContext = context.applicationContext
     private val manager = context.getSystemService(Context.MEDIA_SESSION_SERVICE) as MediaSessionManager
     private val component = ComponentName(context, MediaListenerService::class.java)
     private var controller: MediaController? = null
     private var started = false
+    var restoreCount = 0
+        private set
     var sessionCount = 0
         private set
+    var queryAllowed = false
+        private set
+    private val retry = Runnable { start() }
+    private val poll = object : Runnable {
+        override fun run() {
+            if (started) {
+                refresh()
+                handler.postDelayed(this, 3000L)
+            }
+        }
+    }
     private val callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) {
             publish()
@@ -1964,19 +1978,47 @@ class NowPlayingTracker(
     }
     private val sessionListener = MediaSessionManager.OnActiveSessionsChangedListener { list -> select(list) }
 
+    /**
+     * Some TV firmware switches the notification access setting off a moment after it is enabled.
+     * Android reads that setting at the moment of a media query, so the launcher writes it back
+     * just before asking (needs the WRITE_SECURE_SETTINGS grant) and only when it is missing.
+     */
+    private fun ensureSetting() {
+        try {
+            val resolver = appContext.contentResolver
+            val flat = component.flattenToString()
+            val current = Settings.Secure.getString(resolver, "enabled_notification_listeners") ?: ""
+            if (!current.split(":").contains(flat)) {
+                val updated = if (current.isEmpty()) flat else current + ":" + flat
+                if (Settings.Secure.putString(resolver, "enabled_notification_listeners", updated)) restoreCount++
+            }
+        } catch (e: SecurityException) {
+            // no WRITE_SECURE_SETTINGS grant, nothing to restore
+        }
+    }
+
     fun start() {
         if (started) return
+        ensureSetting()
         try {
             manager.addOnActiveSessionsChangedListener(sessionListener, component, handler)
             started = true
+            queryAllowed = true
             refresh()
+            handler.removeCallbacks(poll)
+            handler.postDelayed(poll, 3000L)
         } catch (e: SecurityException) {
+            queryAllowed = false
             onDenied()
             onChange(null)
+            handler.removeCallbacks(retry)
+            handler.postDelayed(retry, 4000L)
         }
     }
 
     fun stop() {
+        handler.removeCallbacks(poll)
+        handler.removeCallbacks(retry)
         if (started) {
             try {
                 manager.removeOnActiveSessionsChangedListener(sessionListener)
@@ -1987,27 +2029,15 @@ class NowPlayingTracker(
         }
         controller?.unregisterCallback(callback)
         controller = null
-        sessionCount = 0
-        onChange(null)
-    }
-
-    /**
-     * Re-check access and active sessions. This is intentionally public so the Activity can
-     * recover when notification-listener permission is granted externally through ADB/Settings
-     * while the launcher process is already running.
-     */
-    fun refreshNow() {
-        if (!started) {
-            start()
-        } else {
-            refresh()
-        }
     }
 
     private fun refresh() {
+        ensureSetting()
         try {
             select(manager.getActiveSessions(component))
+            queryAllowed = true
         } catch (e: SecurityException) {
+            queryAllowed = false
             onChange(null)
         }
     }
@@ -2720,8 +2750,6 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         clock.refresh()
-        // Re-check after returning from Android settings or after ADB permission changes.
-        handler.postDelayed({ tracker.refreshNow() }, 500L)
     }
 
     override fun onStop() {
@@ -3169,6 +3197,13 @@ class MainActivity : Activity() {
         false
     }
 
+    private fun listenerSettingPresent(): Boolean = try {
+        val component = ComponentName(this, MediaListenerService::class.java).flattenToString()
+        (Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: "").split(":").contains(component)
+    } catch (t: Throwable) {
+        false
+    }
+
     private fun buildSetupState(): SetupState {
         val metrics = resources.displayMetrics
         val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
@@ -3187,7 +3222,7 @@ class MainActivity : Activity() {
             device = (maker + " " + Build.MODEL).trim(),
             androidInfo = "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")",
             display = metrics.widthPixels.toString() + " x " + metrics.heightPixels,
-            listenerOn = hasListenerAccess(),
+            listenerOn = tracker.queryAllowed || hasListenerAccess(),
             canAutoEnable = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED,
             sessionLine = sessionLine,
             sessionOk = np != null,
@@ -3196,7 +3231,10 @@ class MainActivity : Activity() {
             pkg = packageName,
             service = ComponentName(this, MediaListenerService::class.java).flattenToString(),
             homeComponent = ComponentName(this, MainActivity::class.java).flattenToShortString(),
-            isTcl = maker.equals("TCL", true) || brand.contains("tcl", true)
+            isTcl = maker.equals("TCL", true) || brand.contains("tcl", true),
+            settingPresent = listenerSettingPresent(),
+            queryAllowed = tracker.queryAllowed,
+            restored = tracker.restoreCount
         )
     }
 
@@ -3215,13 +3253,8 @@ class MainActivity : Activity() {
     }
 
     private fun refreshSetup() {
-        // ADB may have granted notification access while the launcher was already open.
-        // Restart/retry the tracker instead of merely repainting the setup screen.
-        tracker.refreshNow()
-        handler.postDelayed({
-            if (setupSheet.isOpen) setupSheet.update(buildSetupState())
-            notice.show("Status refreshed")
-        }, 500L)
+        setupSheet.update(buildSetupState())
+        notice.show("Status refreshed")
     }
 
     private fun enableNowPlaying() {
@@ -3854,7 +3887,10 @@ class SetupState(
     val pkg: String,
     val service: String,
     val homeComponent: String,
-    val isTcl: Boolean
+    val isTcl: Boolean,
+    val settingPresent: Boolean,
+    val queryAllowed: Boolean,
+    val restored: Int
 )
 
 class SetupPanelView(context: Context) : View(context) {
@@ -3929,6 +3965,9 @@ class SetupPanelView(context: Context) : View(context) {
             add("adb shell pm grant " + s.pkg + " android.permission.WRITE_SECURE_SETTINGS", 1)
             add("adb shell cmd notification allow_listener " + s.service, 1)
             add("3. Press Refresh Status. The music pill appears at the top whenever a song is playing.", 0)
+            if (s.settingPresent) {
+                add("The setting is saved but Android still refuses the music query, so this TV software may be blocking it. Run the checks in the chat and send me the result.", 2)
+            }
         } else if (!s.sessionOk) {
             add("Now playing access is on for this TV.", 0)
             add("Start a song in Spotify, YouTube Music or another music app, then press Refresh Status. The pill appears at the top of the home screen.", 0)
@@ -3940,6 +3979,9 @@ class SetupPanelView(context: Context) : View(context) {
         if (!s.homeOk) {
             add("To make Sambhav the home screen, run:", 0)
             add("adb shell cmd package set-home-activity " + s.homeComponent, 1)
+        }
+        if (s.restored > 0) {
+            add("This TV switched the notification setting off " + s.restored.toString() + " time(s). Sambhav turned it back on automatically.", 2)
         }
         if (s.isTcl) {
             add("TCL note: some TCL software hides the Notification access screen. The adb commands above work either way.", 2)
@@ -3972,6 +4014,7 @@ class SetupPanelView(context: Context) : View(context) {
         val red = Color.rgb(255, 92, 92)
         val rows = listOf(
             Triple("Now playing access", if (s.listenerOn) "Enabled" else "Off", if (s.listenerOn) green else red),
+            Triple("Setting saved on this TV", if (s.settingPresent) "Yes" else "No", if (s.settingPresent) green else amber),
             Triple("Auto enable permission", if (s.canAutoEnable) "Granted" else "Not granted", if (s.canAutoEnable) green else amber),
             Triple("Media session", s.sessionLine, if (s.sessionOk) green else amber),
             Triple("Home app", if (s.homeOk) "Sambhav TV OS" else "Another launcher", if (s.homeOk) green else amber),
@@ -4020,7 +4063,7 @@ class SetupButton(context: Context, private val label: String, private val prima
     private val bleed = Ui.s(22f)
     private val cardH = Ui.s(62f)
     private val padX = Ui.s(34f)
-    private val surface = GlassSurface(if (primary) GlassSurface.Tone.BRIGHT else GlassSurface.Tone.CLEAR).attach(this)
+    private val surface = GlassSurface(if (primary) GlassSurface.Tone.BRIGHT else GlassSurface.Tone.SMOKED).attach(this)
     private val textPaint = Ui.textPaint(Ui.s(23f), Color.WHITE, Fonts.medium, 0.02f)
     private val textWidth = textPaint.measureText(label)
 
