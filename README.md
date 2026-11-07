@@ -1,5 +1,9 @@
 # 📺 Sambhav TV OS — Best Ad-Free Custom Android TV UI Launcher
 
+<p align="center">
+  <img src="image_fMzgCl.png" alt="Sambhav TV OS Custom UI Layout Showcase" width="100%">
+</p>
+
 [![GitHub release](https://shields.io)](https://github.com)
 [![Platform](https://shields.io)](#)
 [![License](https://shields.io)](#)
