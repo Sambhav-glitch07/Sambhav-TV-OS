@@ -1987,6 +1987,21 @@ class NowPlayingTracker(
         }
         controller?.unregisterCallback(callback)
         controller = null
+        sessionCount = 0
+        onChange(null)
+    }
+
+    /**
+     * Re-check access and active sessions. This is intentionally public so the Activity can
+     * recover when notification-listener permission is granted externally through ADB/Settings
+     * while the launcher process is already running.
+     */
+    fun refreshNow() {
+        if (!started) {
+            start()
+        } else {
+            refresh()
+        }
     }
 
     private fun refresh() {
@@ -2705,6 +2720,8 @@ class MainActivity : Activity() {
     override fun onResume() {
         super.onResume()
         clock.refresh()
+        // Re-check after returning from Android settings or after ADB permission changes.
+        handler.postDelayed({ tracker.refreshNow() }, 500L)
     }
 
     override fun onStop() {
@@ -3198,8 +3215,13 @@ class MainActivity : Activity() {
     }
 
     private fun refreshSetup() {
-        setupSheet.update(buildSetupState())
-        notice.show("Status refreshed")
+        // ADB may have granted notification access while the launcher was already open.
+        // Restart/retry the tracker instead of merely repainting the setup screen.
+        tracker.refreshNow()
+        handler.postDelayed({
+            if (setupSheet.isOpen) setupSheet.update(buildSetupState())
+            notice.show("Status refreshed")
+        }, 500L)
     }
 
     private fun enableNowPlaying() {
