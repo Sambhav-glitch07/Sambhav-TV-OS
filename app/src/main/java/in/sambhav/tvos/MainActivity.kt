@@ -1,8 +1,10 @@
 package com.sambhav.tvos
 
 import android.animation.ValueAnimator
+import android.Manifest
 import android.app.Activity
 import android.app.ActivityOptions
+import android.app.NotificationManager
 import android.content.ActivityNotFoundException
 import android.content.BroadcastReceiver
 import android.content.ComponentName
@@ -10,6 +12,7 @@ import android.content.Context
 import android.content.Intent
 import android.content.IntentFilter
 import android.content.pm.ApplicationInfo
+import android.content.pm.PackageManager
 import android.content.pm.ResolveInfo
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
@@ -1713,6 +1716,207 @@ class RainClockView(context: Context) : View(context) {
     }
 }
 
+/**
+ * Stroke built capital letters that copy a cut-line display style: corner T, open H, short-armed U,
+ * stemless D and R, broken A and S. Only the letters needed for day names are drawn.
+ */
+object GeoLetters {
+    fun width(ch: Char, h: Float): Float = h * when (ch) {
+        'T' -> 0.49f
+        'H' -> 0.84f
+        'U' -> 0.84f
+        'R' -> 0.74f
+        'S' -> 0.84f
+        'D' -> 0.81f
+        'A' -> 0.98f
+        'Y' -> 0.98f
+        'E' -> 0.70f
+        'F' -> 0.70f
+        'I' -> 0.12f
+        'M' -> 1.00f
+        'N' -> 0.84f
+        'O' -> 0.90f
+        'W' -> 1.25f
+        else -> -1f
+    }
+
+    fun build(ch: Char, h: Float): Path? {
+        val w = width(ch, h)
+        if (w < 0f) return null
+        val p = Path()
+        when (ch) {
+            'T' -> {
+                p.moveTo(0f, h); p.lineTo(0f, 0f); p.lineTo(w, 0f)
+            }
+            'H' -> {
+                p.moveTo(0f, h); p.lineTo(0f, h * 0.48f); p.lineTo(w, h * 0.48f)
+                p.moveTo(w, 0f); p.lineTo(w, h)
+            }
+            'U' -> {
+                p.moveTo(0f, 0f); p.lineTo(0f, h - w / 2f)
+                p.arcTo(RectF(0f, h - w, w, h), 180f, -180f)
+                p.lineTo(w, h * 0.61f)
+            }
+            'R' -> {
+                p.moveTo(0f, 0f); p.lineTo(w * 0.5f, 0f)
+                p.arcTo(RectF(0f, 0f, w, h * 0.54f), -90f, 180f)
+                p.lineTo(w * 0.38f, h * 0.54f); p.lineTo(w, h)
+            }
+            'S' -> {
+                p.arcTo(RectF(0f, 0f, w, h * 0.5f), -40f, -230f)
+                p.arcTo(RectF(0f, h * 0.5f, w, h), -90f, 230f)
+            }
+            'D' -> {
+                p.moveTo(0f, 0f); p.lineTo(w * 0.4f, 0f)
+                p.arcTo(RectF(w * -0.2f, 0f, w, h), -90f, 180f)
+                p.lineTo(0f, h)
+            }
+            'A' -> {
+                p.moveTo(0f, h); p.lineTo(w * 0.5f, 0f); p.lineTo(w * 0.82f, h * 0.64f)
+                p.moveTo(w * 0.93f, h * 0.86f); p.lineTo(w, h)
+                p.moveTo(w * 0.58f, h * 0.64f); p.lineTo(w * 0.82f, h * 0.64f)
+            }
+            'Y' -> {
+                p.moveTo(0f, 0f); p.lineTo(w * 0.56f, h * 0.42f)
+                p.moveTo(w, 0f); p.lineTo(w * 0.04f, h)
+            }
+            'E' -> {
+                p.moveTo(w, 0f); p.lineTo(0f, 0f); p.lineTo(0f, h * 0.46f)
+                p.moveTo(0f, h * 0.62f); p.lineTo(0f, h); p.lineTo(w, h)
+                p.moveTo(0f, h * 0.54f); p.lineTo(w * 0.72f, h * 0.54f)
+            }
+            'F' -> {
+                p.moveTo(w, 0f); p.lineTo(0f, 0f); p.lineTo(0f, h * 0.46f)
+                p.moveTo(0f, h * 0.62f); p.lineTo(0f, h)
+                p.moveTo(0f, h * 0.54f); p.lineTo(w * 0.72f, h * 0.54f)
+            }
+            'I' -> {
+                p.moveTo(w / 2f, 0f); p.lineTo(w / 2f, h)
+            }
+            'M' -> {
+                p.moveTo(0f, h); p.lineTo(0f, 0f); p.lineTo(w / 2f, h * 0.56f); p.lineTo(w, 0f); p.lineTo(w, h)
+            }
+            'N' -> {
+                p.moveTo(0f, h); p.lineTo(0f, 0f); p.lineTo(w, h); p.lineTo(w, 0f)
+            }
+            'O' -> {
+                p.arcTo(RectF(0f, 0f, w, h), -70f, 320f)
+            }
+            'W' -> {
+                p.moveTo(0f, 0f); p.lineTo(w * 0.25f, h); p.lineTo(w * 0.5f, h * 0.4f)
+                p.lineTo(w * 0.75f, h); p.lineTo(w, 0f)
+            }
+        }
+        return p
+    }
+}
+
+/** Centered Rainmeter style day, date and time block. */
+class CenterClockView(context: Context) : View(context) {
+    private val letterH = Ui.s(64f)
+    private val strokePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val fallbackPaint = Ui.textPaint(Ui.s(72f), Color.WHITE, Typeface.create("sans-serif-thin", Typeface.NORMAL), 0.5f)
+    private val datePaint = Ui.textPaint(Ui.s(34f), Color.WHITE, Fonts.light, 0.28f)
+    private val timePaint = Ui.textPaint(Ui.s(34f), Color.WHITE, Fonts.light, 0.2f)
+    private val letters = ArrayList<Pair<Path, Float>>()
+    private var useFallback = false
+    private var ink = Color.WHITE
+    private var dayName = ""
+    private var dateLine = ""
+    private var timeLine = ""
+    private var lastMinute = -1
+    private val ticker = object : Runnable {
+        override fun run() {
+            refresh()
+            postDelayed(this, 15_000L)
+        }
+    }
+
+    init {
+        strokePaint.style = Paint.Style.STROKE
+        strokePaint.strokeWidth = letterH * 0.125f
+        strokePaint.strokeCap = Paint.Cap.BUTT
+        strokePaint.strokeJoin = Paint.Join.MITER
+        fallbackPaint.textAlign = Paint.Align.CENTER
+        datePaint.textAlign = Paint.Align.CENTER
+        timePaint.textAlign = Paint.Align.CENTER
+        applyInk()
+    }
+
+    /** Dark ink for pale wallpapers, white ink for dark ones. */
+    fun setInk(dark: Boolean) {
+        ink = if (dark) Color.rgb(16, 22, 48) else Color.WHITE
+        applyInk()
+        invalidate()
+    }
+
+    private fun applyInk() {
+        strokePaint.color = ink
+        fallbackPaint.color = ink
+        datePaint.color = Ui.alpha(ink, 0.9f)
+        timePaint.color = Ui.alpha(ink, 0.9f)
+    }
+
+    fun refresh() {
+        val now = Date()
+        val cal = java.util.Calendar.getInstance()
+        val minute = cal.get(java.util.Calendar.MINUTE)
+        if (minute == lastMinute) return
+        lastMinute = minute
+        val locale = Locale.getDefault()
+        val is24 = DateFormat.is24HourFormat(context)
+        val clock = SimpleDateFormat(if (is24) "HH:mm" else "h:mm a", locale).format(now).uppercase(locale)
+        dayName = SimpleDateFormat("EEEE", locale).format(now).uppercase(locale)
+        dateLine = SimpleDateFormat("d MMMM, yyyy", locale).format(now).uppercase(locale) + "."
+        timeLine = "- " + clock + " -"
+        letters.clear()
+        useFallback = dayName.any { GeoLetters.width(it, letterH) < 0f }
+        if (!useFallback) {
+            for (ch in dayName) {
+                val path = GeoLetters.build(ch, letterH)
+                if (path != null) letters.add(Pair(path, GeoLetters.width(ch, letterH)))
+            }
+        }
+        invalidate()
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(Ui.px(900), Ui.px(300))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val cx = width / 2f
+        val top = Ui.s(40f)
+        if (useFallback || letters.isEmpty()) {
+            canvas.drawText(dayName, cx, top + letterH, fallbackPaint)
+        } else {
+            val gap = letterH * 0.70f
+            var total = gap * (letters.size - 1)
+            for ((_, w) in letters) total += w
+            var x = cx - total / 2f
+            for ((path, w) in letters) {
+                canvas.save()
+                canvas.translate(x, top)
+                canvas.drawPath(path, strokePaint)
+                canvas.restore()
+                x += w + gap
+            }
+        }
+        canvas.drawText(dateLine, cx, top + letterH + Ui.s(70f), datePaint)
+        canvas.drawText(timeLine, cx, top + letterH + Ui.s(124f), timePaint)
+    }
+
+    override fun onAttachedToWindow() {
+        super.onAttachedToWindow()
+        post(ticker)
+    }
+
+    override fun onDetachedFromWindow() {
+        removeCallbacks(ticker)
+        super.onDetachedFromWindow()
+    }
+}
+
 // =====================================================================================
 //  SECTION 4 - Now playing (MediaSession) integration
 // =====================================================================================
@@ -1743,6 +1947,8 @@ class NowPlayingTracker(
     private val component = ComponentName(context, MediaListenerService::class.java)
     private var controller: MediaController? = null
     private var started = false
+    var sessionCount = 0
+        private set
     private val callback = object : MediaController.Callback() {
         override fun onMetadataChanged(metadata: MediaMetadata?) {
             publish()
@@ -1793,6 +1999,7 @@ class NowPlayingTracker(
 
     private fun select(list: List<MediaController>?) {
         val candidates = list.orEmpty()
+        sessionCount = candidates.size
         val chosen = candidates.firstOrNull { it.playbackState?.state == PlaybackState.STATE_PLAYING }
             ?: candidates.firstOrNull { it.metadata != null }
         if (chosen?.sessionToken != controller?.sessionToken) {
@@ -1899,7 +2106,7 @@ class RoundButton(
 class NowPlayingPill(context: Context) : FrameLayout(context) {
     var onHidden: (() -> Unit)? = null
     private val bleed = Ui.s(24f)
-    private val pillW = Ui.s(760f)
+    private val pillW = Ui.s(500f)
     private val pillH = Ui.s(160f)
     val viewWidth: Int = (pillW + bleed * 2).roundToInt()
     val viewHeight: Int = (pillH + bleed * 2).roundToInt()
@@ -2432,11 +2639,12 @@ class MainActivity : Activity() {
     private lateinit var root: FrameLayout
     private lateinit var wallpaper: WallpaperView
     private lateinit var content: FrameLayout
-    private lateinit var clock: RainClockView
+    private lateinit var clock: CenterClockView
     private lateinit var pill: NowPlayingPill
     private lateinit var dock: GlassPanelLayout
     private lateinit var overlay: AllAppsOverlay
     private lateinit var bgMenu: BackgroundMenu
+    private lateinit var setupSheet: SetupSheet
     private lateinit var notice: NoticeView
     private lateinit var repository: AppRepository
     private lateinit var recents: RecentsStore
@@ -2450,6 +2658,7 @@ class MainActivity : Activity() {
     private var lastDockKey: String? = null
     private var loadToken = 0
     private var wallToken = 0
+    private var firstLoad = true
     private var receiversRegistered = false
     private val handler = Handler(Looper.getMainLooper())
     private val executor: ExecutorService = Executors.newSingleThreadExecutor()
@@ -2527,6 +2736,7 @@ class MainActivity : Activity() {
         if (intent != null && intent.hasCategory(Intent.CATEGORY_HOME)) {
             if (overlay.isOpen) closeAllApps(false)
             if (bgMenu.isOpen) closeBackgrounds(false)
+            if (setupSheet.isOpen) closeSetup(false)
             lastDockKey = null
             focusDock(null)
         }
@@ -2547,17 +2757,17 @@ class MainActivity : Activity() {
         content.clipToPadding = false
         root.addView(content, FrameLayout.LayoutParams(MATCH, MATCH))
 
-        clock = RainClockView(this)
+        clock = CenterClockView(this)
         val clockParams = FrameLayout.LayoutParams(WRAP, WRAP)
-        clockParams.gravity = Gravity.TOP or Gravity.START
-        clockParams.leftMargin = Ui.px(81)
-        clockParams.topMargin = Ui.px(34)
+        clockParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        clockParams.topMargin = Ui.px(40)
         content.addView(clock, clockParams)
 
         pill = NowPlayingPill(this)
         pill.onHidden = { focusDock(lastDockKey) }
         val pillParams = FrameLayout.LayoutParams(pill.viewWidth, pill.viewHeight)
-        pillParams.gravity = Gravity.TOP or Gravity.CENTER_HORIZONTAL
+        pillParams.gravity = Gravity.TOP or Gravity.START
+        pillParams.leftMargin = Ui.px(57) - Ui.px(24)
         pillParams.topMargin = Ui.px(62) - Ui.px(24)
         content.addView(pill, pillParams)
 
@@ -2566,14 +2776,17 @@ class MainActivity : Activity() {
         buttons.clipChildren = false
         buttons.clipToPadding = false
         val diameter = Ui.s(69f)
+        val setup = RoundButton(this, Glyph.SLIDERS, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
         val background = RoundButton(this, Glyph.PALETTE, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
         val inputs = RoundButton(this, Glyph.INPUT, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
         val network = RoundButton(this, Glyph.WIFI, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
         val gear = RoundButton(this, Glyph.GEAR, diameter, GlassSurface.Tone.CLEAR, Color.WHITE)
+        setup.focusKey = "top:setup"
         background.focusKey = "top:background"
         inputs.focusKey = "top:inputs"
         network.focusKey = "top:network"
         gear.focusKey = "top:settings"
+        setup.setOnClickListener { openSetup() }
         background.setOnClickListener { openBackgrounds() }
         inputs.setOnClickListener {
             openSystem(
@@ -2587,7 +2800,7 @@ class MainActivity : Activity() {
         gear.setOnClickListener {
             openSystem(listOf(Settings.ACTION_SETTINGS), "Settings are unavailable on this device")
         }
-        for (b in listOf(background, inputs, network, gear)) {
+        for (b in listOf(setup, background, inputs, network, gear)) {
             val lp = LinearLayout.LayoutParams(WRAP, WRAP)
             lp.leftMargin = -Ui.px(4)
             lp.rightMargin = -Ui.px(4)
@@ -2612,6 +2825,15 @@ class MainActivity : Activity() {
 
         bgMenu = BackgroundMenu(this, { applyBackground(it) }, { pickImage() }, { deleteBackground(it) })
         root.addView(bgMenu, FrameLayout.LayoutParams(MATCH, MATCH))
+
+        setupSheet = SetupSheet(
+            this,
+            { enableNowPlaying() },
+            { openNotificationAccess() },
+            { refreshSetup() },
+            { closeSetup(true) }
+        )
+        root.addView(setupSheet, FrameLayout.LayoutParams(MATCH, MATCH))
 
         notice = NoticeView(this)
         val noticeParams = FrameLayout.LayoutParams(WRAP, WRAP)
@@ -2640,8 +2862,10 @@ class MainActivity : Activity() {
             } catch (t: Throwable) {
                 null
             }
+            val luma = topLuma(bmp)
             handler.post {
                 if (token == wallToken && !isDestroyed) {
+                    clock.setInk(luma > 0.62f)
                     Backdrop.set(blur, bmp, metrics.widthPixels, metrics.heightPixels)
                     wallpaper.setBitmap(bmp)
                     root.invalidateTree()
@@ -2650,8 +2874,30 @@ class MainActivity : Activity() {
         }
     }
 
+    /** Average brightness of the area behind the day and date text. */
+    private fun topLuma(bmp: Bitmap): Float {
+        val x0 = (bmp.width * 0.30f).toInt()
+        val x1 = (bmp.width * 0.70f).toInt()
+        val y0 = (bmp.height * 0.05f).toInt()
+        val y1 = (bmp.height * 0.35f).toInt()
+        var sum = 0f
+        var count = 0
+        var y = y0
+        while (y < y1) {
+            var x = x0
+            while (x < x1) {
+                val c = bmp.getPixel(x, y)
+                sum += (0.299f * Color.red(c) + 0.587f * Color.green(c) + 0.114f * Color.blue(c)) / 255f
+                count++
+                x += 8
+            }
+            y += 8
+        }
+        return if (count == 0) 0f else sum / count
+    }
+
     private fun openBackgrounds() {
-        if (overlay.isOpen || bgMenu.isOpen) return
+        if (overlay.isOpen || bgMenu.isOpen || setupSheet.isOpen) return
         executor.execute {
             val options = store.options()
             val thumbs = HashMap<String, Bitmap>()
@@ -2760,7 +3006,8 @@ class MainActivity : Activity() {
             handler.post {
                 if (token == loadToken && !isDestroyed) {
                     apps = list
-                    val key = (currentFocus as? FocusGlassView)?.focusKey ?: lastDockKey
+                    val key = if (firstLoad) lastDockKey else ((currentFocus as? FocusGlassView)?.focusKey ?: lastDockKey)
+                    firstLoad = false
                     rebuildDock(key, !overlay.isOpen && !bgMenu.isOpen)
                 }
             }
@@ -2858,7 +3105,7 @@ class MainActivity : Activity() {
     }
 
     private fun openAllApps() {
-        if (bgMenu.isOpen) return
+        if (bgMenu.isOpen || setupSheet.isOpen) return
         overlay.populate(apps) { dockStore.isPinned(it) }
         content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
         overlay.open()
@@ -2890,10 +3137,114 @@ class MainActivity : Activity() {
         if (!prefs.getBoolean("np_hint_shown", false)) {
             prefs.edit().putBoolean("np_hint_shown", true).apply()
             handler.postDelayed(
-                { notice.show("Enable notification access for Sambhav TV OS to show now playing") },
+                { notice.show("Open TV Setup (top right) to turn on now playing") },
                 2500L
             )
         }
+    }
+
+    // ---- tv setup --------------------------------------------------------------------
+
+    private fun hasListenerAccess(): Boolean = try {
+        val nm = getSystemService(Context.NOTIFICATION_SERVICE) as NotificationManager
+        nm.isNotificationListenerAccessGranted(ComponentName(this, MediaListenerService::class.java))
+    } catch (t: Throwable) {
+        false
+    }
+
+    private fun buildSetupState(): SetupState {
+        val metrics = resources.displayMetrics
+        val homeIntent = Intent(Intent.ACTION_MAIN).addCategory(Intent.CATEGORY_HOME)
+        val home = packageManager.resolveActivity(homeIntent, PackageManager.MATCH_DEFAULT_ONLY)
+        val np = nowPlaying
+        val sessions = tracker.sessionCount
+        val sessionLine = when {
+            np != null -> np.title + " (" + np.packageName + ")"
+            sessions > 0 -> sessions.toString() + " session found, nothing playing"
+            else -> "None detected"
+        }
+        val wallName = store.options().firstOrNull { it.id == store.currentId() }?.name ?: "Blue Sky"
+        val maker = Build.MANUFACTURER ?: ""
+        val brand = Build.BRAND ?: ""
+        return SetupState(
+            device = (maker + " " + Build.MODEL).trim(),
+            androidInfo = "Android " + Build.VERSION.RELEASE + " (API " + Build.VERSION.SDK_INT + ")",
+            display = metrics.widthPixels.toString() + " x " + metrics.heightPixels,
+            listenerOn = hasListenerAccess(),
+            canAutoEnable = checkSelfPermission(Manifest.permission.WRITE_SECURE_SETTINGS) == PackageManager.PERMISSION_GRANTED,
+            sessionLine = sessionLine,
+            sessionOk = np != null,
+            homeOk = home?.activityInfo?.packageName == packageName,
+            wallpaper = wallName,
+            pkg = packageName,
+            service = ComponentName(this, MediaListenerService::class.java).flattenToString(),
+            homeComponent = ComponentName(this, MainActivity::class.java).flattenToShortString(),
+            isTcl = maker.equals("TCL", true) || brand.contains("tcl", true)
+        )
+    }
+
+    private fun openSetup() {
+        if (overlay.isOpen || bgMenu.isOpen || setupSheet.isOpen) return
+        setupSheet.update(buildSetupState())
+        content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
+        setupSheet.open()
+        runAfterLayout { setupSheet.preferredFocus().requestFocus() }
+    }
+
+    private fun closeSetup(restoreFocus: Boolean) {
+        setupSheet.close()
+        content.descendantFocusability = ViewGroup.FOCUS_AFTER_DESCENDANTS
+        if (restoreFocus) runAfterLayout { focusByKey("top:setup") }
+    }
+
+    private fun refreshSetup() {
+        setupSheet.update(buildSetupState())
+        notice.show("Status refreshed")
+    }
+
+    private fun enableNowPlaying() {
+        val component = ComponentName(this, MediaListenerService::class.java).flattenToString()
+        var done = false
+        try {
+            val current = Settings.Secure.getString(contentResolver, "enabled_notification_listeners") ?: ""
+            if (current.split(":").contains(component)) {
+                done = true
+            } else {
+                val updated = if (current.isEmpty()) component else current + ":" + component
+                done = Settings.Secure.putString(contentResolver, "enabled_notification_listeners", updated)
+            }
+        } catch (e: SecurityException) {
+            done = false
+        }
+        if (done) {
+            notice.show("Now playing enabled")
+            handler.postDelayed({
+                tracker.stop()
+                tracker.start()
+            }, 600L)
+            handler.postDelayed({ if (setupSheet.isOpen) setupSheet.update(buildSetupState()) }, 1500L)
+        } else {
+            notice.show("This TV needs the adb commands shown on the right")
+            openNotificationAccess()
+        }
+    }
+
+    private fun openNotificationAccess() {
+        val actions = listOf(
+            Settings.ACTION_NOTIFICATION_LISTENER_SETTINGS,
+            "android.settings.NOTIFICATION_POLICY_ACCESS_SETTINGS"
+        )
+        for (action in actions) {
+            try {
+                startActivity(Intent(action).addFlags(Intent.FLAG_ACTIVITY_NEW_TASK))
+                return
+            } catch (e: ActivityNotFoundException) {
+                // try next
+            } catch (e: SecurityException) {
+                // try next
+            }
+        }
+        notice.show("This TV hides that screen. Use the adb commands shown")
     }
 
     // ---- keys ------------------------------------------------------------------------
@@ -2905,7 +3256,9 @@ class MainActivity : Activity() {
         }
         if (keyCode == KeyEvent.KEYCODE_BACK) {
             if (event == null || event.repeatCount == 0) {
-                if (bgMenu.isOpen) {
+                if (setupSheet.isOpen) {
+                    closeSetup(true)
+                } else if (bgMenu.isOpen) {
                     closeBackgrounds(true)
                 } else if (overlay.isOpen) {
                     closeAllApps(true)
@@ -3252,8 +3605,12 @@ fun View.invalidateTree() {
 // =====================================================================================
 
 /** Full screen sheet: blurred wallpaper, soft dim and a large glass pane. */
-open class SheetLayout(context: Context, private val panelFor: (Int, Int) -> RectF) : FrameLayout(context) {
-    private val surface = GlassSurface(GlassSurface.Tone.FROST).attach(this)
+open class SheetLayout(
+    context: Context,
+    private val panelFor: (Int, Int) -> RectF,
+    tone: GlassSurface.Tone = GlassSurface.Tone.FROST
+) : FrameLayout(context) {
+    private val surface = GlassSurface(tone).attach(this)
     private val backdropPaint = Paint(Paint.ANTI_ALIAS_FLAG or Paint.FILTER_BITMAP_FLAG)
 
     init {
@@ -3273,7 +3630,7 @@ open class SheetLayout(context: Context, private val panelFor: (Int, Int) -> Rec
         } else {
             canvas.drawColor(Color.BLACK)
         }
-        canvas.drawColor(Ui.alpha(Color.BLACK, 0.36f))
+        canvas.drawColor(Ui.alpha(Color.BLACK, 0.46f))
         surface.drawBase(canvas, 0f)
         surface.drawGloss(canvas, 0f)
     }
@@ -3440,6 +3797,278 @@ class BackgroundMenu(
         column.addView(carousel, LinearLayout.LayoutParams(MATCH, BgCard.heightFor()))
         row = carousel
     }
+
+    fun open() {
+        isOpen = true
+        animate().cancel()
+        visibility = View.VISIBLE
+        alpha = 0f
+        animate().alpha(1f).setDuration(260L).start()
+    }
+
+    fun close() {
+        isOpen = false
+        animate().cancel()
+        animate().alpha(0f).setDuration(200L).withEndAction {
+            if (!isOpen) visibility = View.GONE
+        }.start()
+    }
+}
+
+// =====================================================================================
+//  SECTION 11 - TV setup sheet (now playing / dynamic island configuration)
+// =====================================================================================
+
+class SetupState(
+    val device: String,
+    val androidInfo: String,
+    val display: String,
+    val listenerOn: Boolean,
+    val canAutoEnable: Boolean,
+    val sessionLine: String,
+    val sessionOk: Boolean,
+    val homeOk: Boolean,
+    val wallpaper: String,
+    val pkg: String,
+    val service: String,
+    val homeComponent: String,
+    val isTcl: Boolean
+)
+
+class SetupPanelView(context: Context) : View(context) {
+    private class Line(val text: String, val kind: Int)
+
+    private var state: SetupState? = null
+    private val lines = ArrayList<Line>()
+    private val titlePaint = Ui.textPaint(Ui.s(54f), Color.WHITE, Fonts.light, -0.01f)
+    private val subPaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.62f), Fonts.regular, 0.30f)
+    private val capsPaint = Ui.textPaint(Ui.s(18f), Ui.alpha(Color.WHITE, 0.6f), Fonts.regular, 0.34f)
+    private val labelPaint = Ui.textPaint(Ui.s(24f), Color.WHITE, Fonts.regular, 0.01f)
+    private val valuePaint = Ui.textPaint(Ui.s(22f), Ui.alpha(Color.WHITE, 0.78f), Fonts.regular, 0.01f)
+    private val bodyPaint = Ui.textPaint(Ui.s(23f), Ui.alpha(Color.WHITE, 0.9f), Fonts.regular, 0.005f)
+    private val notePaint = Ui.textPaint(Ui.s(20f), Ui.alpha(Color.WHITE, 0.58f), Fonts.regular, 0.005f)
+    private val cmdPaint = Ui.textPaint(Ui.s(19f), Color.rgb(190, 235, 255), Typeface.MONOSPACE)
+    private val linePaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val dotPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val boxPaint = Paint(Paint.ANTI_ALIAS_FLAG)
+    private val box = RectF()
+    private val textWidth = Ui.s(840f)
+
+    init {
+        valuePaint.textAlign = Paint.Align.RIGHT
+        linePaint.color = Color.WHITE
+        linePaint.strokeCap = Paint.Cap.ROUND
+        boxPaint.color = Color.argb(110, 0, 0, 0)
+    }
+
+    fun setState(s: SetupState) {
+        state = s
+        rebuild(s)
+        invalidate()
+    }
+
+    private fun wrap(text: String, paint: Paint, maxW: Float): List<String> {
+        val out = ArrayList<String>()
+        var cur = StringBuilder()
+        for (word in text.split(" ")) {
+            val trial = if (cur.isEmpty()) word else cur.toString() + " " + word
+            if (paint.measureText(trial) <= maxW) {
+                cur = StringBuilder(trial)
+            } else {
+                if (cur.isNotEmpty()) out.add(cur.toString())
+                cur = StringBuilder(word)
+                while (paint.measureText(cur.toString()) > maxW && cur.length > 1) {
+                    var n = cur.length
+                    while (n > 1 && paint.measureText(cur.substring(0, n)) > maxW) n--
+                    out.add(cur.substring(0, n))
+                    cur = StringBuilder(cur.substring(n))
+                }
+            }
+        }
+        if (cur.isNotEmpty()) out.add(cur.toString())
+        return out
+    }
+
+    private fun add(text: String, kind: Int) {
+        val paint = when (kind) {
+            1 -> cmdPaint
+            2 -> notePaint
+            else -> bodyPaint
+        }
+        for (l in wrap(text, paint, textWidth)) lines.add(Line(l, kind))
+    }
+
+    private fun rebuild(s: SetupState) {
+        lines.clear()
+        if (!s.listenerOn) {
+            add("1. Press Enable Now Playing. Many TVs allow this instantly.", 0)
+            add("2. If it does not turn on, run these on your computer while the TV and computer are on the same Wi-Fi (USB debugging enabled on the TV):", 0)
+            add("adb connect <TV-IP>:5555", 1)
+            add("adb shell pm grant " + s.pkg + " android.permission.WRITE_SECURE_SETTINGS", 1)
+            add("adb shell cmd notification allow_listener " + s.service, 1)
+            add("3. Press Refresh Status. The music pill appears at the top whenever a song is playing.", 0)
+        } else if (!s.sessionOk) {
+            add("Now playing access is on for this TV.", 0)
+            add("Start a song in Spotify, YouTube Music or another music app, then press Refresh Status. The pill appears at the top of the home screen.", 0)
+            add("If the app is playing but nothing shows here, that app does not publish media information to Android.", 2)
+        } else {
+            add("Everything is set. The music pill is live for this TV.", 0)
+            add(s.sessionLine, 2)
+        }
+        if (!s.homeOk) {
+            add("To make Sambhav the home screen, run:", 0)
+            add("adb shell cmd package set-home-activity " + s.homeComponent, 1)
+        }
+        if (s.isTcl) {
+            add("TCL note: some TCL software hides the Notification access screen. The adb commands above work either way.", 2)
+        } else {
+            add("Typical path if you prefer menus: Settings, Apps, Special app access, Notification access. The name varies by software version.", 2)
+        }
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension(MeasureSpec.getSize(widthMeasureSpec), MeasureSpec.getSize(heightMeasureSpec))
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val s = state ?: return
+        val x = Ui.s(96f)
+        val right = width - x
+        canvas.drawText("TV Setup", x, Ui.s(160f), titlePaint)
+        canvas.drawText((s.device + "  /  " + s.androidInfo).uppercase(Locale.getDefault()), x, Ui.s(204f), subPaint)
+        linePaint.strokeWidth = max(1f, Ui.s(1.4f))
+        linePaint.alpha = 50
+        canvas.drawLine(x, Ui.s(232f), right, Ui.s(232f), linePaint)
+        linePaint.strokeWidth = Ui.s(2.4f)
+        linePaint.alpha = 235
+        canvas.drawLine(x, Ui.s(232f), x + Ui.s(64f), Ui.s(232f), linePaint)
+
+        canvas.drawText("STATUS", x, Ui.s(282f), capsPaint)
+        val colRight = x + Ui.s(780f)
+        val green = Color.rgb(61, 220, 132)
+        val amber = Color.rgb(255, 184, 77)
+        val red = Color.rgb(255, 92, 92)
+        val rows = listOf(
+            Triple("Now playing access", if (s.listenerOn) "Enabled" else "Off", if (s.listenerOn) green else red),
+            Triple("Auto enable permission", if (s.canAutoEnable) "Granted" else "Not granted", if (s.canAutoEnable) green else amber),
+            Triple("Media session", s.sessionLine, if (s.sessionOk) green else amber),
+            Triple("Home app", if (s.homeOk) "Sambhav TV OS" else "Another launcher", if (s.homeOk) green else amber),
+            Triple("Display", s.display, green),
+            Triple("Wallpaper", s.wallpaper, green)
+        )
+        var y = Ui.s(336f)
+        for ((label, value, color) in rows) {
+            dotPaint.color = color
+            canvas.drawCircle(x + Ui.s(8f), y - Ui.s(8f), Ui.s(6f), dotPaint)
+            canvas.drawText(label, x + Ui.s(32f), y, labelPaint)
+            val shown = TextUtils.ellipsize(value, valuePaint, Ui.s(380f), TextUtils.TruncateAt.END).toString()
+            canvas.drawText(shown, colRight, y, valuePaint)
+            linePaint.strokeWidth = max(1f, Ui.s(1f))
+            linePaint.alpha = 28
+            canvas.drawLine(x, y + Ui.s(22f), colRight, y + Ui.s(22f), linePaint)
+            y += Ui.s(62f)
+        }
+
+        val rx = Ui.s(1000f)
+        canvas.drawText("FIX IT FOR THIS TV", rx, Ui.s(282f), capsPaint)
+        var ty = Ui.s(330f)
+        for (line in lines) {
+            when (line.kind) {
+                1 -> {
+                    box.set(rx - Ui.s(10f), ty - Ui.s(24f), rx + min(textWidth, cmdPaint.measureText(line.text)) + Ui.s(12f), ty + Ui.s(9f))
+                    canvas.drawRoundRect(box, Ui.s(8f), Ui.s(8f), boxPaint)
+                    canvas.drawText(line.text, rx, ty, cmdPaint)
+                    ty += Ui.s(40f)
+                }
+                2 -> {
+                    canvas.drawText(line.text, rx, ty, notePaint)
+                    ty += Ui.s(30f)
+                }
+                else -> {
+                    canvas.drawText(line.text, rx, ty, bodyPaint)
+                    ty += Ui.s(33f)
+                }
+            }
+        }
+    }
+}
+
+class SetupButton(context: Context, private val label: String, private val primary: Boolean) :
+    FocusGlassView(context, 1.06f, 0f) {
+    private val bleed = Ui.s(22f)
+    private val cardH = Ui.s(62f)
+    private val padX = Ui.s(34f)
+    private val surface = GlassSurface(if (primary) GlassSurface.Tone.BRIGHT else GlassSurface.Tone.CLEAR).attach(this)
+    private val textPaint = Ui.textPaint(Ui.s(23f), Color.WHITE, Fonts.medium, 0.02f)
+    private val textWidth = textPaint.measureText(label)
+
+    init {
+        contentDescription = label
+        textPaint.textAlign = Paint.Align.CENTER
+    }
+
+    override fun onMeasure(widthMeasureSpec: Int, heightMeasureSpec: Int) {
+        setMeasuredDimension((textWidth + padX * 2 + bleed * 2).roundToInt(), (cardH + bleed * 2).roundToInt())
+    }
+
+    override fun onSizeChanged(w: Int, h: Int, oldw: Int, oldh: Int) {
+        super.onSizeChanged(w, h, oldw, oldh)
+        surface.layout(bleed, bleed, w - bleed, h - bleed, cardH / 2f)
+        pivotX = w / 2f
+        pivotY = h / 2f
+    }
+
+    override fun onDraw(canvas: Canvas) {
+        val f = focusFraction
+        surface.drawBase(canvas, f)
+        surface.drawGloss(canvas, f)
+        textPaint.color = if (primary) Color.rgb(12, 13, 18) else Color.WHITE
+        canvas.drawText(label, width / 2f, Ui.baseline(textPaint, height / 2f), textPaint)
+    }
+}
+
+class SetupSheet(
+    context: Context,
+    onEnable: () -> Unit,
+    onOpenAccess: () -> Unit,
+    onRefresh: () -> Unit,
+    onClose: () -> Unit
+) : SheetLayout(context, { w, h -> RectF(Ui.s(40f), Ui.s(56f), w - Ui.s(40f), h - Ui.s(56f)) }, GlassSurface.Tone.SMOKED) {
+    private val panel = SetupPanelView(context)
+    private val enable = SetupButton(context, "Enable Now Playing", true)
+    var isOpen = false
+        private set
+
+    init {
+        visibility = View.GONE
+        addView(panel, FrameLayout.LayoutParams(MATCH, MATCH))
+        val row = LinearLayout(context)
+        row.orientation = LinearLayout.HORIZONTAL
+        row.clipChildren = false
+        val access = SetupButton(context, "Open Notification Access", false)
+        val refresh = SetupButton(context, "Refresh Status", false)
+        val close = SetupButton(context, "Close", false)
+        enable.focusKey = "setup:enable"
+        access.focusKey = "setup:access"
+        refresh.focusKey = "setup:refresh"
+        close.focusKey = "setup:close"
+        enable.setOnClickListener { onEnable() }
+        access.setOnClickListener { onOpenAccess() }
+        refresh.setOnClickListener { onRefresh() }
+        close.setOnClickListener { onClose() }
+        for (b in listOf(enable, access, refresh, close)) row.addView(b, LinearLayout.LayoutParams(WRAP, WRAP))
+        val lp = FrameLayout.LayoutParams(WRAP, WRAP)
+        lp.gravity = Gravity.BOTTOM or Gravity.START
+        lp.leftMargin = Ui.px(96) - Ui.px(22)
+        lp.bottomMargin = Ui.px(90)
+        addView(row, lp)
+    }
+
+    fun update(state: SetupState) {
+        panel.setState(state)
+    }
+
+    fun preferredFocus(): View = enable
 
     fun open() {
         isOpen = true
