@@ -38,6 +38,7 @@ import android.media.session.MediaController
 import android.media.session.MediaSessionManager
 import android.media.session.PlaybackState
 import android.os.Build
+import android.os.Environment
 import android.os.Bundle
 import android.os.Handler
 import android.os.Looper
@@ -2875,6 +2876,7 @@ class MainActivity : Activity() {
             this,
             { enableNowPlaying() },
             { openNotificationAccess() },
+            { requestStoragePermission() },
             { refreshSetup() },
             { closeSetup(true) }
         )
@@ -2961,7 +2963,7 @@ class MainActivity : Activity() {
             }
             handler.post {
                 if (isDestroyed) return@post
-                bgMenu.populate(options, thumbs, store.currentId(), store.dir.absolutePath)
+                bgMenu.populate(options, thumbs, store.currentId(), store.dir.absolutePath + "    or    /sdcard/Sambhav/backgrounds")
                 content.descendantFocusability = ViewGroup.FOCUS_BLOCK_DESCENDANTS
                 bgMenu.open()
                 runAfterLayout { bgMenu.preferredFocus()?.requestFocus() }
@@ -3052,8 +3054,10 @@ class MainActivity : Activity() {
                 if (token == loadToken && !isDestroyed) {
                     apps = list
                     val key = if (firstLoad) lastDockKey else ((currentFocus as? FocusGlassView)?.focusKey ?: lastDockKey)
+                    val wasFirst = firstLoad
                     firstLoad = false
                     rebuildDock(key, !overlay.isOpen && !bgMenu.isOpen)
+                    if (wasFirst) maybePromptPermissions()
                 }
             }
         }
@@ -3234,7 +3238,8 @@ class MainActivity : Activity() {
             isTcl = maker.equals("TCL", true) || brand.contains("tcl", true),
             settingPresent = listenerSettingPresent(),
             queryAllowed = tracker.queryAllowed,
-            restored = tracker.restoreCount
+            restored = tracker.restoreCount,
+            storageGranted = hasStoragePermission()
         )
     }
 
@@ -3299,7 +3304,46 @@ class MainActivity : Activity() {
                 // try next
             }
         }
-        notice.show("This TV hides that screen. Use the adb commands shown")
+        notice.show("Open Settings, Apps, Special app access, Notification access")
+    }
+
+    // ---- permissions -----------------------------------------------------------------
+
+    private fun hasStoragePermission(): Boolean =
+        checkSelfPermission(Manifest.permission.READ_EXTERNAL_STORAGE) == PackageManager.PERMISSION_GRANTED
+
+    private fun requestStoragePermission() {
+        if (hasStoragePermission()) {
+            store.ensureSharedDir()
+            notice.show("Storage permission already granted")
+            if (setupSheet.isOpen) setupSheet.update(buildSetupState())
+            return
+        }
+        requestPermissions(
+            arrayOf(Manifest.permission.READ_EXTERNAL_STORAGE, Manifest.permission.WRITE_EXTERNAL_STORAGE),
+            REQ_PERM
+        )
+    }
+
+    /** Asks for permissions once, the first time the launcher runs, then shows the setup screen. */
+    private fun maybePromptPermissions() {
+        val prefs = getSharedPreferences("sambhav_launcher", Context.MODE_PRIVATE)
+        if (prefs.getBoolean("perm_prompted", false)) return
+        prefs.edit().putBoolean("perm_prompted", true).apply()
+        handler.postDelayed({ if (!isDestroyed) requestStoragePermission() }, 1200L)
+    }
+
+    override fun onRequestPermissionsResult(requestCode: Int, permissions: Array<out String>, grantResults: IntArray) {
+        super.onRequestPermissionsResult(requestCode, permissions, grantResults)
+        if (requestCode != REQ_PERM) return
+        val granted = grantResults.isNotEmpty() && grantResults.all { it == PackageManager.PERMISSION_GRANTED }
+        if (granted) store.ensureSharedDir()
+        notice.show(if (granted) "Storage permission granted" else "Storage permission denied")
+        if (setupSheet.isOpen) {
+            setupSheet.update(buildSetupState())
+        } else if (!tracker.queryAllowed) {
+            handler.postDelayed({ if (!isDestroyed) openSetup() }, 900L)
+        }
     }
 
     // ---- keys ------------------------------------------------------------------------
@@ -3329,6 +3373,7 @@ class MainActivity : Activity() {
     companion object {
         private const val STATE_FOCUS = "state_focus"
         private const val REQ_PICK = 4107
+        private const val REQ_PERM = 4108
     }
 }
 
@@ -3571,6 +3616,24 @@ class WallpaperStore(private val context: Context) {
     private val prefs = context.getSharedPreferences("sambhav_launcher", Context.MODE_PRIVATE)
     val dir: File = (context.getExternalFilesDir("backgrounds") ?: File(context.filesDir, "backgrounds")).also { it.mkdirs() }
 
+    /** Shared folder anyone can copy pictures into (needs the storage permission). */
+    @Suppress("DEPRECATION")
+    val sharedDir: File = File(Environment.getExternalStorageDirectory(), "Sambhav/backgrounds")
+
+    fun ensureSharedDir() {
+        try {
+            sharedDir.mkdirs()
+        } catch (e: SecurityException) {
+            // permission not granted yet
+        }
+    }
+
+    private fun fileFor(id: String): File? = when {
+        id.startsWith("file:") -> File(dir, id.removePrefix("file:"))
+        id.startsWith("ext:") -> File(sharedDir, id.removePrefix("ext:"))
+        else -> null
+    }
+
     fun currentId(): String = prefs.getString("bg_id", "sky") ?: "sky"
 
     fun setCurrent(id: String) {
@@ -3584,17 +3647,25 @@ class WallpaperStore(private val context: Context) {
         files?.sortedByDescending { it.lastModified() }?.forEach {
             list.add(BgOption("file:" + it.name, it.nameWithoutExtension, it))
         }
+        val shared = try {
+            sharedDir.listFiles { f -> f.isFile && IMAGE_EXT.any { f.name.lowercase(Locale.US).endsWith(it) } }
+        } catch (e: SecurityException) {
+            null
+        }
+        shared?.sortedByDescending { it.lastModified() }?.forEach {
+            list.add(BgOption("ext:" + it.name, it.nameWithoutExtension, it))
+        }
         return list
     }
 
     fun render(id: String, w: Int, h: Int, reqW: Int): Bitmap {
-        if (id.startsWith("file:")) {
-            val file = File(dir, id.removePrefix("file:"))
+        val file = fileFor(id)
+        if (file != null) {
             val bmp = decodeFile(file, reqW, reqW * 9 / 16)
             if (bmp != null) return bmp
             setCurrent("sky")
         }
-        return PresetArt.render(id.takeIf { !it.startsWith("file:") } ?: "sky", w, h)
+        return PresetArt.render(if (file != null) "sky" else id, w, h)
     }
 
     fun thumbnail(option: BgOption): Bitmap {
@@ -3637,7 +3708,10 @@ class WallpaperStore(private val context: Context) {
         return BgOption("file:" + file.name, file.nameWithoutExtension, file)
     }
 
-    fun delete(option: BgOption): Boolean = option.file?.delete() ?: false
+    fun delete(option: BgOption): Boolean {
+        val f = option.file ?: return false
+        return f.parentFile == dir && f.delete()
+    }
 
     companion object {
         val PRESETS = listOf(
@@ -3890,7 +3964,8 @@ class SetupState(
     val isTcl: Boolean,
     val settingPresent: Boolean,
     val queryAllowed: Boolean,
-    val restored: Int
+    val restored: Int,
+    val storageGranted: Boolean
 )
 
 class SetupPanelView(context: Context) : View(context) {
@@ -3980,13 +4055,16 @@ class SetupPanelView(context: Context) : View(context) {
             add("To make Sambhav the home screen, run:", 0)
             add("adb shell cmd package set-home-activity " + s.homeComponent, 1)
         }
+        if (!s.storageGranted) {
+            add("Press Grant Permissions to let Sambhav read pictures from /sdcard/Sambhav/backgrounds.", 2)
+        }
         if (s.restored > 0) {
             add("This TV switched the notification setting off " + s.restored.toString() + " time(s). Sambhav turned it back on automatically.", 2)
         }
         if (s.isTcl) {
-            add("TCL note: some TCL software hides the Notification access screen. The adb commands above work either way.", 2)
+            add("On this TV the screen is at Settings, Apps, Special app access, Notification access. If Sambhav switches itself off after you leave that screen, the TV is blocking it.", 2)
         } else {
-            add("Typical path if you prefer menus: Settings, Apps, Special app access, Notification access. The name varies by software version.", 2)
+            add("Typical path: Settings, Apps, Special app access, Notification access. The name varies by software version.", 2)
         }
     }
 
@@ -4016,6 +4094,7 @@ class SetupPanelView(context: Context) : View(context) {
             Triple("Now playing access", if (s.listenerOn) "Enabled" else "Off", if (s.listenerOn) green else red),
             Triple("Setting saved on this TV", if (s.settingPresent) "Yes" else "No", if (s.settingPresent) green else amber),
             Triple("Auto enable permission", if (s.canAutoEnable) "Granted" else "Not granted", if (s.canAutoEnable) green else amber),
+            Triple("Storage permission", if (s.storageGranted) "Granted" else "Not granted", if (s.storageGranted) green else amber),
             Triple("Media session", s.sessionLine, if (s.sessionOk) green else amber),
             Triple("Home app", if (s.homeOk) "Sambhav TV OS" else "Another launcher", if (s.homeOk) green else amber),
             Triple("Display", s.display, green),
@@ -4096,6 +4175,7 @@ class SetupSheet(
     context: Context,
     onEnable: () -> Unit,
     onOpenAccess: () -> Unit,
+    onPermissions: () -> Unit,
     onRefresh: () -> Unit,
     onClose: () -> Unit
 ) : SheetLayout(context, { w, h -> RectF(Ui.s(40f), Ui.s(56f), w - Ui.s(40f), h - Ui.s(56f)) }, GlassSurface.Tone.SMOKED) {
@@ -4111,17 +4191,20 @@ class SetupSheet(
         row.orientation = LinearLayout.HORIZONTAL
         row.clipChildren = false
         val access = SetupButton(context, "Open Notification Access", false)
+        val perms = SetupButton(context, "Grant Permissions", false)
         val refresh = SetupButton(context, "Refresh Status", false)
         val close = SetupButton(context, "Close", false)
         enable.focusKey = "setup:enable"
         access.focusKey = "setup:access"
+        perms.focusKey = "setup:perms"
         refresh.focusKey = "setup:refresh"
         close.focusKey = "setup:close"
         enable.setOnClickListener { onEnable() }
         access.setOnClickListener { onOpenAccess() }
+        perms.setOnClickListener { onPermissions() }
         refresh.setOnClickListener { onRefresh() }
         close.setOnClickListener { onClose() }
-        for (b in listOf(enable, access, refresh, close)) row.addView(b, LinearLayout.LayoutParams(WRAP, WRAP))
+        for (b in listOf(enable, access, perms, refresh, close)) row.addView(b, LinearLayout.LayoutParams(WRAP, WRAP))
         val lp = FrameLayout.LayoutParams(WRAP, WRAP)
         lp.gravity = Gravity.BOTTOM or Gravity.START
         lp.leftMargin = Ui.px(96) - Ui.px(22)
