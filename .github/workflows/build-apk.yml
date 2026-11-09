@@ -1,18 +1,15 @@
-name: Build Sambhav TV OS APK
+name: Build Sambhav TV OS
 
 on:
   push:
-    branches: [ "main", "master" ]
+    branches: [main, master]
   workflow_dispatch:
-
-permissions:
-  contents: read
 
 jobs:
   build:
     runs-on: ubuntu-latest
     steps:
-      - name: Checkout source
+      - name: Checkout
         uses: actions/checkout@v4
 
       - name: Set up JDK 17
@@ -21,24 +18,39 @@ jobs:
           distribution: temurin
           java-version: "17"
 
-      - name: Set up Gradle
+      # Pinning 8.9 here means the "gradle" command below is 8.9, not the newest Gradle.
+      - name: Set up Gradle 8.9
         uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: "8.9"
 
+      # Creating the wrapper is a convenience, not a requirement. If the download check fails
+      # (a temporary outage of services.gradle.org), the build continues with Gradle 8.9 directly.
       - name: Generate Gradle wrapper if missing
-        shell: bash
         run: |
           if [ ! -f gradlew ]; then
-            gradle wrapper --gradle-version 8.9
+            for i in 1 2 3; do
+              gradle wrapper --gradle-version 8.9 --no-validate-url \
+                || gradle wrapper --gradle-version 8.9 \
+                || true
+              [ -f gradlew ] && break
+              echo "Wrapper attempt $i did not produce gradlew, retrying in 10 seconds"
+              sleep 10
+            done
           fi
-          chmod +x gradlew
+          [ -f gradlew ] && chmod +x gradlew || echo "No wrapper, using Gradle 8.9 directly"
 
       - name: Build debug APK
-        run: ./gradlew --no-daemon assembleDebug
+        run: |
+          if [ -f gradlew ]; then
+            ./gradlew --no-daemon assembleDebug --stacktrace
+          else
+            gradle --no-daemon assembleDebug --stacktrace
+          fi
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
         with:
-          name: Sambhav-TV-OS-debug-apk
+          name: sambhav-tv-os-debug-apk
           path: app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
-          retention-days: 14
