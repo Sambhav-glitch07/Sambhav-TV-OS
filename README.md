@@ -48,7 +48,7 @@ Getting a clean, premium TV layout takes less than five minutes:
 
 ## 🛠️ Developer & TCL Compatibility Notes
 
-*   **Application ID:** `in.sambhav.tvos`
+*   **Application ID:** `com.sambhav.tvos`
 *   **Target Level:** Android 9 (API 28) up to recent versions.
 *   **Build Environment:** Android Gradle Plugin 8.7.3, Gradle 8.9, JDK 17.
 
